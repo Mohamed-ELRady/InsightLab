@@ -52,6 +52,26 @@ _BOOLEAN_TOKENS = {
 #: Below this share of parseable values we do not treat a text column as dates.
 DATE_PARSE_THRESHOLD = 0.8
 
+#: Calendar labels. pandas parses "January" and "2024" as dates, but a column of
+#: month names is a set of groups to compare, not a timeline to plot, and a year
+#: column is a label you cannot meaningfully average.
+CALENDAR_LABEL_NAMES = frozenset(
+    {"year", "month", "quarter", "week", "day", "month_name", "day_of_week", "weekday"}
+)
+
+_MONTH_AND_DAY_WORDS = frozenset(
+    {
+        "january", "february", "march", "april", "may", "june", "july",
+        "august", "september", "october", "november", "december",
+        "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
+        "oct", "nov", "dec",
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+        "sunday", "mon", "tue", "tues", "wed", "thu", "thur", "thurs", "fri",
+        "sat", "sun",
+        "q1", "q2", "q3", "q4",
+    }
+)
+
 #: A column with at least this share of distinct values looks like a key.
 IDENTIFIER_UNIQUE_RATIO = 0.9
 
@@ -73,6 +93,11 @@ def try_parse_datetime(series: pd.Series) -> pd.Series | None:
     # A column of bare integers parses as nanosecond timestamps, which is
     # almost never what the user meant.
     if sample.str.fullmatch(r"\d+(\.\d+)?").mean() > 0.5:
+        return None
+
+    # "January" and "Monday" parse as dates but are labels for grouping, not
+    # points on a timeline.
+    if sample.str.strip().str.casefold().isin(_MONTH_AND_DAY_WORDS).mean() > 0.5:
         return None
 
     parsed = pd.to_datetime(series, errors="coerce", format="mixed")
@@ -99,6 +124,11 @@ def detect_role(series: pd.Series, name: str) -> Role:
     unique_count = int(non_null.nunique())
     if unique_count == 1:
         return Role.CONSTANT
+
+    # A calendar part is a label whatever it is stored as. Averaging a month
+    # number or totalling a year would both be meaningless.
+    if name.casefold() in CALENDAR_LABEL_NAMES:
+        return Role.CATEGORY
 
     if pd.api.types.is_bool_dtype(series) or _looks_boolean(series):
         return Role.BOOLEAN

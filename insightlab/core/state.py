@@ -56,8 +56,8 @@ STAGES: tuple[tuple[str, str], ...] = (
     ("clean", "Cleaning the data"),
     ("features", "Building new measures"),
     ("explore", "Exploring the data"),
-    ("insights", "Drawing conclusions"),
     ("kpis", "Summarising performance"),
+    ("insights", "Drawing conclusions"),
     ("dashboard", "Building dashboards"),
     ("report", "Writing the report"),
 )
