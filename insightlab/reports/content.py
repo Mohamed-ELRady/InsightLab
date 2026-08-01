@@ -62,13 +62,14 @@ def render_chart_images(state: PipelineState) -> dict[str, bytes]:
                 plot_bgcolor="#ffffff",
                 margin=dict(l=70, r=40, t=30, b=60),
             )
+            # Bars and heatmaps grow with the number of categories, so they
+            # keep the height the chart builder asked for.
+            height = IMAGE_HEIGHT
+            if chart.kind in ("bar", "heatmap"):
+                height = max(IMAGE_HEIGHT, int(figure.layout.height or IMAGE_HEIGHT))
+
             images[chart.id] = figure.to_image(
-                format="png",
-                width=IMAGE_WIDTH,
-                height=chart.kind in ("bar", "heatmap")
-                and max(IMAGE_HEIGHT, figure.layout.height or IMAGE_HEIGHT)
-                or IMAGE_HEIGHT,
-                scale=2,
+                format="png", width=IMAGE_WIDTH, height=height, scale=2
             )
         except Exception:  # noqa: BLE001 - a missing picture must not lose the report
             continue
