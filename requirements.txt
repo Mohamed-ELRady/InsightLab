@@ -6,14 +6,13 @@ pandas>=2.2.0
 numpy>=1.26.0
 openpyxl>=3.1.0
 xlrd>=2.0.1
-scikit-learn>=1.5.0
-scipy>=1.13.0
 
 # Visualisation
+# Plotly alone covers both jobs: interactive figures on screen and, through
+# kaleido, static images for the documents. A second plotting library would
+# mean a second visual system to keep consistent with the first.
 plotly>=5.22.0
 kaleido>=0.2.1
-matplotlib>=3.9.0
-seaborn>=0.13.0
 
 # Web interface
 streamlit>=1.37.0
