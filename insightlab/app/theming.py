@@ -65,7 +65,13 @@ def show_chart(chart: Chart, *, key: str = "") -> None:
 
 
 def kpi_tiles(kpis: list[Kpi], columns: int = 4) -> None:
-    """A row of headline figures, each with its formula underneath."""
+    """A row of headline figures, each with its formula underneath.
+
+    Deliberately no delta badge. Streamlit colours a delta by parsing it as a
+    number, and a figure that already carries its own sign - a growth rate of
+    -3.7% - would get a green upward badge beside it. A falling number shown in
+    green is worse than no badge at all.
+    """
     if not kpis:
         return
     for start in range(0, len(kpis), columns):
@@ -75,7 +81,6 @@ def kpi_tiles(kpis: list[Kpi], columns: int = 4) -> None:
                 st.metric(
                     label=kpi.name,
                     value=kpi.display_value,
-                    delta=kpi.trend or None,
                     help=f"{kpi.formula}\n\n{kpi.interpretation}",
                 )
                 st.caption(kpi.formula)

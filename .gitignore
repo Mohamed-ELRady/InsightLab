@@ -43,9 +43,6 @@ reports/generated/
 # Streamlit
 .streamlit/secrets.toml
 
-# Local tooling / editor
-.claude/
-
 # OS / editor
 .DS_Store
 Thumbs.db

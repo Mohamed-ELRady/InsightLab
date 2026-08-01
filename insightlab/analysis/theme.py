@@ -160,10 +160,14 @@ def style(
         bargap=0.28,
         barcornerradius=4,
     )
+    # automargin everywhere: these figures are rendered side by side in a
+    # two-column dashboard, where a long category name would otherwise be
+    # clipped to a single letter.
     figure.update_xaxes(
         title_text=x_title,
         showgrid=False,
         zeroline=False,
+        automargin=True,
         linecolor=palette["axis"],
         tickfont=dict(color=palette["muted"], size=11),
         title_font=dict(color=palette["muted"], size=11),
@@ -174,6 +178,7 @@ def style(
         gridcolor=palette["grid"],
         gridwidth=1,
         zeroline=False,
+        automargin=True,
         linecolor="rgba(0,0,0,0)",
         tickfont=dict(color=palette["muted"], size=11),
         title_font=dict(color=palette["muted"], size=11),

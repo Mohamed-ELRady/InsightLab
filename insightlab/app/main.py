@@ -276,7 +276,19 @@ def begin(uploaded, mode: RunMode, reuse: Path | None) -> None:
     supervisor = Supervisor(state)
     st.session_state.state = state
     st.session_state.supervisor = supervisor
-    st.session_state.pending = supervisor.start()
+
+    # An autonomous run does the whole pipeline inside this one call, which
+    # takes the best part of a minute. Without a spinner the page just sits
+    # there looking broken.
+    if mode is RunMode.AUTONOMOUS:
+        with st.spinner(
+            "Working through your data - loading, cleaning, exploring and "
+            "writing it up. This usually takes under a minute.",
+            show_time=True,
+        ):
+            st.session_state.pending = supervisor.start()
+    else:
+        st.session_state.pending = supervisor.start()
 
 
 def reset() -> None:

@@ -42,6 +42,12 @@ MIN_TREND_POINTS = 4
 #: are excluded anywhere a number is treated as a magnitude.
 CALENDAR_NUMBERS = frozenset({"year", "month", "day", "week", "day_of_month"})
 
+#: A correlation grid larger than this is a wall of numbers nobody reads.
+MAX_CORRELATION_MEASURES = 8
+
+#: Above this many rows, heatmap cells are too narrow to hold their value.
+LABELLED_HEATMAP_LIMIT = 6
+
 
 @dataclass
 class Columns:
@@ -189,6 +195,17 @@ def _compact(value: float) -> str:
     if magnitude >= 10:
         return f"{value:,.0f}"
     return f"{value:,.2f}"
+
+
+def _range_with_label_room(values: list[float]) -> list[float] | None:
+    """An axis range leaving space for a value label outside the longest bar."""
+    if not values:
+        return None
+    highest = max(values)
+    lowest = min(min(values), 0.0)
+    if highest <= 0:
+        return None
+    return [lowest, highest * 1.18]
 
 
 def _wrap(figure: go.Figure, chart_id: str, title: str, kind: str, description: str,
@@ -355,7 +372,13 @@ def category_bar(
         x_title=quantity_label,
         height=max(260, 46 * len(labels) + 80),
     )
-    figure.update_xaxes(showgrid=True, gridcolor=theme.LIGHT["grid"])
+    # Room for the label sitting outside the longest bar, which would
+    # otherwise be clipped mid-word at the edge of the plot.
+    figure.update_xaxes(
+        showgrid=True,
+        gridcolor=theme.LIGHT["grid"],
+        range=_range_with_label_room(totals),
+    )
     figure.update_yaxes(showgrid=False)
 
     # Describe the ranking using the named groups only. "Other" is a bucket of
@@ -475,10 +498,15 @@ def correlation_heatmap(
     numeric = numeric.loc[:, numeric.nunique() > 1]
     if numeric.shape[1] < 3:
         return None
-    numeric = numeric.iloc[:, :10]
+    numeric = numeric.iloc[:, :MAX_CORRELATION_MEASURES]
 
     matrix = numeric.corr(numeric_only=True).round(2)
     labels = [name.replace("_", " ") for name in matrix.columns]
+
+    # The number in each cell only fits while the grid is small. Past that the
+    # labels overlap into an unreadable smear, and the colour, the hover and
+    # the table underneath carry the value instead.
+    labelled = len(labels) <= LABELLED_HEATMAP_LIMIT
 
     figure = go.Figure(
         go.Heatmap(
@@ -490,8 +518,8 @@ def correlation_heatmap(
             colorscale=[list(stop) for stop in theme.DIVERGING_LIGHT],
             xgap=2,
             ygap=2,
-            text=matrix.to_numpy(),
-            texttemplate="%{text:.2f}",
+            text=matrix.to_numpy() if labelled else None,
+            texttemplate="%{text:.2f}" if labelled else None,
             textfont=dict(size=10),
             hovertemplate="%{y} and %{x}<br>%{z:.2f}<extra></extra>",
             colorbar=dict(
@@ -790,7 +818,11 @@ def missing_values_chart(profile: DatasetProfile, axis: str = "general") -> Char
         x_title="Percent of rows with no value",
         height=max(240, 44 * len(names) + 80),
     )
-    figure.update_xaxes(showgrid=True, gridcolor=theme.LIGHT["grid"])
+    figure.update_xaxes(
+        showgrid=True,
+        gridcolor=theme.LIGHT["grid"],
+        range=_range_with_label_room(shares),
+    )
     figure.update_yaxes(showgrid=False)
 
     description = (
