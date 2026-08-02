@@ -21,7 +21,7 @@ import pandas as pd
 
 from ..analysis.features import apply_custom_rule
 from ..analysis.profiling import profile_dataset
-from ..core.claims import Claim, Test, read_claim, test_claim
+from ..core.claims import Claim, Test, evaluate_claim, read_claim
 from ..core.decision import Option
 from ..core.reasoning import AgentPersona
 from ..core.state import PipelineState
@@ -83,27 +83,26 @@ class MemoryAgent(Agent):
 
         self._extract_claims(state)
 
-        contradictions = self._find_contradictions(state)
-        if not contradictions:
-            checked = len(state.memory.testable())
-            state.finish_stage(
-                self.stage,
-                f"Checked {checked} of the things you have told us against this "
-                "file. Nothing disagrees."
-                if checked
-                else "Nothing you have told us could be checked against this file.",
-            )
-            return
-
-        for fact, result in contradictions[:MAX_CONTRADICTIONS]:
+        for fact, result in self._find_contradictions(state)[:MAX_CONTRADICTIONS]:
             yield from self._raise(state, fact, result)
 
+        # Always, not only when something disagreed: applying what the owner
+        # already told us is the point of storing it, and it has nothing to do
+        # with whether this file happened to contradict anything.
         applied = self._apply_classifications(state)
+
+        checked = len(state.memory.testable())
+        raised = len(state.log.for_stage(self.stage))
+        parts = []
+        if checked:
+            parts.append(f"Checked {checked} of the things you have told us")
+        if applied:
+            parts.append(f"applied {applied} of your own classifications")
         state.finish_stage(
             self.stage,
-            f"Checked what you have told us against this file: "
-            f"{len(contradictions)} disagreement(s) raised"
-            + (f", {applied} classification(s) applied automatically." if applied else "."),
+            ("; ".join(parts) + ".")
+            if parts
+            else "Nothing you have told us could be checked against this file.",
         )
 
     # -- turning statements into claims ------------------------------------
@@ -177,7 +176,7 @@ class MemoryAgent(Agent):
                 # Already raised and settled once. Raising it every run would
                 # be nagging, not diligence.
                 continue
-            result = test_claim(fact.claim, state.frame, state.profile)
+            result = evaluate_claim(fact.claim, state.frame, state.profile)
             if result.contradicts:
                 results.append((fact, result))
         return results

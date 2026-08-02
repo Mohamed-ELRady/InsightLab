@@ -21,6 +21,8 @@ from insightlab.agents.supervisor import Supervisor
 from insightlab.analysis.exploration import AXES
 from insightlab.app import conversation, decision_panel, theming
 from insightlab.core.config import PROJECT_ROOT, get_settings
+from insightlab.core.language import ARABIC, ENGLISH, LANGUAGES
+from insightlab.core.language import translate as _t
 from insightlab.core.state import (
     STAGES,
     STAGE_TITLES,
@@ -39,6 +41,22 @@ STATUS_MARKS = {
 }
 
 UPLOAD_DIR = PROJECT_ROOT / "data" / "uploads"
+
+
+def language():
+    """The language this session is in.
+
+    Read from the run once one exists, and from the picker before that, so the
+    landing page is already translated when the user changes it.
+    """
+    state = st.session_state.get("state")
+    if state is not None:
+        return state.language
+    return LANGUAGES.get(st.session_state.get("language_code", "en"), ENGLISH)
+
+
+def t(key: str) -> str:
+    return _t(key, language())
 ACCEPTED = ["csv", "tsv", "txt", "xlsx", "xlsm", "xls"]
 
 
@@ -49,7 +67,7 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    st.markdown(theming.stylesheet(), unsafe_allow_html=True)
+    st.markdown(theming.stylesheet(language().rtl), unsafe_allow_html=True)
 
     sidebar()
     if "supervisor" not in st.session_state:
@@ -68,10 +86,20 @@ def sidebar() -> None:
 
     with st.sidebar:
         st.markdown("### InsightLab")
-        st.caption(
-            "You know your business. We know the numbers. Between the two we "
-            "get to something useful."
-        )
+
+        if "supervisor" not in st.session_state:
+            chosen = st.segmented_control(
+                "Language",
+                options=list(LANGUAGES),
+                format_func=lambda code: LANGUAGES[code].name,
+                default=st.session_state.get("language_code", "en"),
+                label_visibility="collapsed",
+            )
+            if chosen and chosen != st.session_state.get("language_code"):
+                st.session_state.language_code = chosen
+                st.rerun()
+
+        st.caption(t("app.tagline"))
         st.divider()
 
         if "supervisor" in st.session_state:
@@ -79,11 +107,11 @@ def sidebar() -> None:
             st.divider()
             memory_panel()
             st.divider()
-            if st.button("Start a new analysis", width="stretch"):
+            if st.button(t("sidebar.new_run"), width="stretch"):
                 reset()
                 st.rerun()
         else:
-            st.markdown("**Analysis model**")
+            st.markdown(f"**{t('sidebar.model')}**")
             st.caption(settings.describe_llm())
             if not settings.llm_available:
                 st.caption(
@@ -95,7 +123,7 @@ def sidebar() -> None:
         previous = list_runs()
         if previous:
             st.divider()
-            st.markdown("**Earlier analyses**")
+            st.markdown(f"**{t('sidebar.earlier')}**")
             for run in previous[:5]:
                 st.caption(run.name)
 
@@ -104,7 +132,7 @@ def stage_list() -> None:
     state: PipelineState = st.session_state.state
     supervisor: Supervisor = st.session_state.supervisor
 
-    st.markdown("**Progress**")
+    st.markdown(f"**{t('sidebar.progress')}**")
     for key, title in STAGES:
         status = state.stage_status[key]
         mark = STATUS_MARKS[status]
@@ -124,7 +152,7 @@ def memory_panel() -> None:
     """What the owner has told us, and a way to add to it at any time."""
     state: PipelineState = st.session_state.state
 
-    st.markdown(f"**What we know about your business** ({len(state.memory)})")
+    st.markdown(f"**{t('sidebar.memory')}** ({len(state.memory)})")
     if not state.memory:
         st.caption(
             "Nothing yet. Anything you tell us during the analysis is kept here "
@@ -138,7 +166,7 @@ def memory_panel() -> None:
                 unsafe_allow_html=True,
             )
 
-    with st.expander("Add something we should know"):
+    with st.expander(t("sidebar.memory.add")):
         text = st.text_area(
             "Fact",
             key="memory_input",
@@ -151,7 +179,7 @@ def memory_panel() -> None:
             ["definition", "seasonality", "exclusion", "classification", "target", "context"],
             key="memory_category",
         )
-        if st.button("Remember this", width="stretch") and text.strip():
+        if st.button(t("sidebar.memory.save"), width="stretch") and text.strip():
             state.remember(text, category=category, stage="user", topic="Added by you")
             st.rerun()
 
@@ -162,28 +190,32 @@ def memory_panel() -> None:
 
 
 def landing() -> None:
-    st.title("Understand your own data")
-    st.markdown(
-        "Upload a file and we will work through it together. At every point "
-        "where the answer depends on how *your* business works rather than on "
-        "what the numbers say, we stop and ask you."
-    )
+    st.title(t("landing.title"))
+    st.markdown(t("landing.intro"))
 
     left, right = st.columns([3, 2], gap="large")
 
     with left:
         uploaded = st.file_uploader(
-            "Your data file",
+            t("landing.files"),
             type=ACCEPTED,
-            help="CSV, Excel or a tab-separated export. Your file is never "
-            "modified - everything is done on a copy.",
+            accept_multiple_files=True,
+            help="CSV, Excel or a tab-separated export. Upload several and we "
+            "will work out how they relate - sales, products and customers "
+            "usually come out as separate files. Your files are never "
+            "modified; everything is done on a copy.",
         )
+        if uploaded and len(uploaded) > 1:
+            st.caption(
+                f"{len(uploaded)} files. We will ask how each one attaches to "
+                "the largest before combining them."
+            )
 
         mode_label = st.radio(
-            "How would you like to work?",
+            t("landing.mode"),
             [
-                "Ask me at every decision",
-                "Run it all automatically",
+                t("landing.mode.interactive"),
+                t("landing.mode.autonomous"),
             ],
             captions=[
                 "We stop and explain each choice, and you decide. This is where "
@@ -195,23 +227,23 @@ def landing() -> None:
         )
         mode = (
             RunMode.INTERACTIVE
-            if mode_label.startswith("Ask")
+            if mode_label == t("landing.mode.interactive")
             else RunMode.AUTONOMOUS
         )
 
         reuse = carry_over_memory()
 
         if st.button(
-            "Start the analysis",
+            t("landing.start"),
             type="primary",
-            disabled=uploaded is None,
+            disabled=not uploaded,
             width="stretch",
         ):
             begin(uploaded, mode, reuse)
             st.rerun()
 
     with right:
-        st.markdown("#### What you will end up with")
+        st.markdown(f"#### {t('landing.deliverables')}")
         for item in (
             "A cleaned copy of your data, with every change to it listed",
             "The conclusions that matter, each with the figure behind it",
@@ -223,13 +255,13 @@ def landing() -> None:
             st.markdown(f"- {item}")
 
         st.divider()
-        st.markdown("#### The areas we can look at")
+        st.markdown(f"#### {t('landing.areas')}")
         st.caption(", ".join(AXES.values()) + ".")
 
         sample = PROJECT_ROOT / "data" / "samples" / "retail_sales.csv"
         if sample.exists():
             st.divider()
-            if st.button("Try it with sample data", width="stretch"):
+            if st.button(t("landing.sample"), width="stretch"):
                 # Honours whichever mode was selected above, so the sample
                 # behaves exactly like a real upload.
                 begin(sample, mode, reuse)
@@ -245,7 +277,7 @@ def carry_over_memory() -> Path | None:
         return None
 
     if not st.checkbox(
-        "Start from what a previous analysis already knows about my business"
+        t("landing.reuse")
     ):
         return None
 
@@ -263,13 +295,20 @@ def begin(uploaded, mode: RunMode, reuse: Path | None) -> None:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     if isinstance(uploaded, Path):
-        source = uploaded
+        saved = [uploaded]
     else:
-        source = UPLOAD_DIR / uploaded.name
-        source.write_bytes(uploaded.getbuffer())
+        # The uploader returns a list when several files are allowed, and a
+        # single object when only one was chosen.
+        incoming = uploaded if isinstance(uploaded, list) else [uploaded]
+        saved = []
+        for item in incoming:
+            target = UPLOAD_DIR / item.name
+            target.write_bytes(item.getbuffer())
+            saved.append(target)
 
-    state = PipelineState(mode=mode)
-    state.source_path = source
+    state = PipelineState(mode=mode, language=language())
+    state.source_path = saved[0]
+    state.extra_paths = saved[1:]
     if reuse is not None:
         state.memory = load_business_memory(reuse)
 
@@ -311,7 +350,7 @@ def run_view() -> None:
         text=(
             supervisor.current_title or "Finished"
             if not supervisor.finished
-            else "Analysis complete"
+            else t("complete")
         ),
     )
 
@@ -319,7 +358,7 @@ def run_view() -> None:
     if pending is not None:
         st.subheader(STAGE_TITLES.get(pending.stage, ""))
         with st.container(border=True):
-            answer = decision_panel.render(pending)
+            answer = decision_panel.render(pending, language())
             decision_panel.render_evidence(pending)
         if answer is not None:
             st.session_state.pending = supervisor.resolve(answer)
@@ -356,14 +395,14 @@ def results(state: PipelineState) -> None:
 
     tabs = st.tabs(
         [
-            "Ask a question",
-            "Dashboards",
-            "What the data shows",
-            "Headline figures",
-            "All charts",
-            "Your data",
-            "What we changed",
-            "Downloads",
+            t("tab.ask"),
+            t("tab.dashboards"),
+            t("tab.insights"),
+            t("tab.kpis"),
+            t("tab.charts"),
+            t("tab.data"),
+            t("tab.log"),
+            t("tab.downloads"),
         ]
     )
 
@@ -431,17 +470,21 @@ def insights_tab(state: PipelineState) -> None:
                 st.markdown(f"#### {insight.title}")
             with badge:
                 st.markdown(
-                    theming.confidence_badge(insight.confidence),
+                    theming.confidence_badge(insight.confidence, language()),
                     unsafe_allow_html=True,
                 )
 
             st.markdown(insight.result)
             if insight.evidence:
-                st.caption(f"Evidence: {insight.evidence}")
+                st.caption(f"{t('insight.evidence')}: {insight.evidence}")
             if insight.interpretation:
-                st.markdown(f"**What this means.** {insight.interpretation}")
+                st.markdown(f"**{t('insight.meaning')}.** {insight.interpretation}")
+            if insight.caveat:
+                st.warning(f"**{t('insight.caveat')}.** {insight.caveat}")
+            if insight.objection:
+                st.info(f"**{t('insight.objection')}.** {insight.objection}")
             if insight.action:
-                st.success(f"**What to do.** {insight.action}")
+                st.success(f"**{t('insight.action')}.** {insight.action}")
 
             chart = state.chart(insight.chart_id) if insight.chart_id else None
             if chart is not None:

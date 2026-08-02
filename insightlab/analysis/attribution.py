@@ -36,6 +36,10 @@ MAX_DIMENSION_VALUES = 40
 #: movement is not an explanation, it is a data dump.
 MAX_DIMENSIONS_DESCRIBED = 3
 
+#: Label for rows with no value in the dimension being broken down. They are a
+#: group in their own right, and often an informative one.
+NOT_RECORDED = "not recorded"
+
 #: Columns that are functions of the date. When the movement being explained is
 #: itself a period, these are circular - "November was high because of
 #: November" - so they are excluded from a time-based attribution. They stay
@@ -261,7 +265,13 @@ def _breakdown(
 
     def totals(frame: pd.DataFrame) -> pd.Series:
         values = pd.to_numeric(frame[measure], errors="coerce")
-        return values.groupby(frame[column].astype(str)).sum()
+        # Rows with no value in this column are their own group, not nothing.
+        # pandas drops NaN keys from a groupby, and astype(str) no longer
+        # converts them to the string "nan", so without this every row with a
+        # blank region silently vanishes and the contributions stop adding up
+        # to the movement - which is the one property this whole module sells.
+        keys = frame[column].astype(str).fillna(NOT_RECORDED)
+        return values.groupby(keys).sum()
 
     after = totals(period_rows)
     before = totals(baseline_rows)

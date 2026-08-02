@@ -11,6 +11,7 @@ from pathlib import Path
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 from ..core.state import PipelineState
@@ -24,34 +25,61 @@ MUTED = RGBColor(0x89, 0x87, 0x81)
 CONTENT_WIDTH = 6.3
 
 
+def _make_rtl(paragraph) -> None:
+    """Mark a paragraph right-to-left.
+
+    Word shapes and reorders Arabic itself, so unlike the PDF this needs no
+    text processing - only the direction flag, which Word then honours for
+    both the text and the bullet position.
+    """
+    properties = paragraph._p.get_or_add_pPr()
+    marker = properties.makeelement(qn("w:bidi"), {})
+    properties.append(marker)
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+
+
 def write_docx(state: PipelineState, path: Path, content: ReportContent | None = None) -> Path:
     content = content or build_content(state)
     path.parent.mkdir(parents=True, exist_ok=True)
+    rtl = state.language.rtl
 
     document = Document()
-    _set_base_font(document)
+    _set_base_font(document, rtl)
 
     heading = document.add_heading(content.title, level=0)
     for run in heading.runs:
         run.font.color.rgb = INK
 
+    if rtl:
+        _make_rtl(heading)
+
     subtitle = document.add_paragraph(content.subtitle)
     subtitle.runs[0].font.color.rgb = MUTED
     subtitle.runs[0].font.size = Pt(10)
+    if rtl:
+        _make_rtl(subtitle)
 
     for section in content.sections:
-        document.add_heading(section.title, level=1)
+        section_heading = document.add_heading(section.title, level=1)
+        if rtl:
+            _make_rtl(section_heading)
 
         for paragraph in section.paragraphs:
-            document.add_paragraph(paragraph)
+            written = document.add_paragraph(paragraph)
+            if rtl:
+                _make_rtl(written)
 
         for bullet in section.bullets:
             lines = [line for line in str(bullet).split("\n") if line.strip()]
             if not lines:
                 continue
-            document.add_paragraph(lines[0], style="List Bullet")
+            first = document.add_paragraph(lines[0], style="List Bullet")
+            if rtl:
+                _make_rtl(first)
             for line in lines[1:]:
                 nested = document.add_paragraph(line)
+                if rtl:
+                    _make_rtl(nested)
                 nested.paragraph_format.left_indent = Inches(0.5)
                 nested.paragraph_format.space_after = Pt(2)
                 for run in nested.runs:
@@ -68,9 +96,10 @@ def write_docx(state: PipelineState, path: Path, content: ReportContent | None =
     return path
 
 
-def _set_base_font(document: Document) -> None:
+def _set_base_font(document: Document, rtl: bool = False) -> None:
     style = document.styles["Normal"]
-    style.font.name = "Calibri"
+    # A font Word will have and that carries Arabic glyphs.
+    style.font.name = "Arial" if rtl else "Calibri"
     style.font.size = Pt(10.5)
     style.font.color.rgb = SECONDARY
     style.paragraph_format.space_after = Pt(8)

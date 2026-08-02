@@ -73,6 +73,22 @@ class ReportAgent(Agent):
             )
             return
 
+        if state.language.rtl:
+            from ..reports import arabic
+
+            if not arabic.available():
+                # A PDF without an Arabic font renders every letter as an empty
+                # box. Saying so is far better than handing over a file the
+                # owner cannot read and cannot diagnose.
+                self.warn(
+                    state,
+                    "No Arabic-capable font was found on this machine, so the "
+                    "PDF would come out as empty boxes. Set "
+                    "INSIGHTLAB_ARABIC_FONT to a .ttf file to fix it. The Word "
+                    "and PowerPoint versions are unaffected, since those "
+                    "applications supply their own fonts.",
+                )
+
         # Built once and shared: chart images are the expensive part, and three
         # renderers of the same material must not disagree with each other.
         content = build_content(state)

@@ -121,6 +121,10 @@ class DataLoaderAgent(Agent):
             state.fail_stage(self.stage, "No file was provided to analyse.")
             return
 
+        if state.extra_paths:
+            yield from self._load_many(state)
+            return
+
         path = Path(path)
         suffix = path.suffix.lower()
         if suffix not in SUPPORTED:
@@ -172,6 +176,219 @@ class DataLoaderAgent(Agent):
             f"Read {len(frame):,} rows and {frame.shape[1]} columns from "
             f"{path.name} ({state.source_format}).",
         )
+
+    # -- several files -----------------------------------------------------
+
+    def _load_many(self, state: PipelineState) -> Flow:
+        """Load every supplied file and offer to join them.
+
+        The files are loaded first and the relationships proposed second,
+        because a relationship can only be scored once the actual values are in
+        front of us - name similarity alone gets this wrong often enough to be
+        dangerous.
+        """
+        from ..analysis import joining
+        from ..analysis.profiling import profile_dataset
+
+        paths = [Path(state.source_path), *(Path(item) for item in state.extra_paths)]
+        tables: list[joining.Table] = []
+
+        for path in paths:
+            if not path.exists():
+                self.warn(state, f"{path.name} could not be found and was skipped.")
+                continue
+            try:
+                frame = yield from self._read_one(state, path)
+            except LoadError as error:
+                self.warn(state, f"{path.name} could not be read: {error}")
+                continue
+            if frame is None or frame.empty:
+                continue
+            frame = self._tidy(frame)
+            tables.append(
+                joining.Table(
+                    name=path.stem,
+                    frame=frame,
+                    profile=profile_dataset(frame),
+                    path=path,
+                )
+            )
+
+        if not tables:
+            state.fail_stage(self.stage, "None of the supplied files could be read.")
+            return
+
+        base = joining.choose_base(tables)
+        others = [table for table in tables if table is not base]
+
+        state.source_name = base.path.name if base.path else base.name
+        state.source_format = SUPPORTED.get(
+            base.path.suffix.lower() if base.path else "", "data file"
+        )
+        state.raw_frame = base.frame.copy()
+
+        from ..analysis.comparison import fingerprint
+
+        state.fingerprint = fingerprint(base.frame)
+        state.set_frame(
+            base.frame,
+            self.stage,
+            f"Loaded {len(base.frame):,} rows and {base.frame.shape[1]} columns "
+            f"from {base.name}, the largest file.",
+        )
+
+        if others:
+            yield from self._offer_joins(state, base, others)
+
+        state.finish_stage(
+            self.stage,
+            f"Loaded {len(tables)} files and combined them into "
+            f"{len(state.frame):,} rows and {state.frame.shape[1]} columns.",
+        )
+
+    def _offer_joins(self, state: PipelineState, base, others) -> Flow:
+        """Ask about each relationship, one file at a time."""
+        from ..analysis import joining
+
+        for other in others:
+            candidates = joining.find_candidates(
+                joining.Table(base.name, state.frame, base.profile, base.path), other
+            )
+            if not candidates:
+                self.warn(
+                    state,
+                    f"No column in {other.name} matches anything in "
+                    f"{base.name}, so it could not be attached. Its data is not "
+                    "part of the analysis.",
+                )
+                continue
+
+            best = candidates[0]
+            decision = self.decide(
+                topic=f"Attaching {other.name}",
+                question=(
+                    f"How does {other.name} relate to {base.name}?"
+                ),
+                context=(
+                    f"{other.describe()}\n\n"
+                    "Getting this right is what lets the analysis use both files "
+                    "together - a margin needs cost, and cost often lives in a "
+                    "second export. Getting it wrong quietly multiplies your "
+                    "rows and inflates every total, so the effect on the row "
+                    "count is given for each option.\n\n"
+                    f"{best.describe()}"
+                ),
+                suggestion=Option(
+                    label=(
+                        f"Match {best.left_column} to {best.right_column}"
+                        + ("" if best.is_safe else " (this would multiply rows)")
+                    ),
+                    rationale=(
+                        f"{best.overlap:.0%} of values match and the row count "
+                        f"stays at {best.expected_rows:,}."
+                        if best.is_safe
+                        else (
+                            f"{best.overlap:.0%} of values match, but the row "
+                            f"count would rise from {best.left_rows:,} to "
+                            f"{best.expected_rows:,}. Only choose this if one "
+                            f"row in {base.name} genuinely has several matches."
+                        )
+                    ),
+                    payload={"index": 0},
+                ),
+                alternatives=[
+                    Option(
+                        label=f"Match {item.left_column} to {item.right_column}",
+                        rationale=item.describe(),
+                        payload={"index": index},
+                    )
+                    for index, item in enumerate(candidates[1:4], start=1)
+                ]
+                + [
+                    Option(
+                        label=f"Do not use {other.name}",
+                        rationale=(
+                            "The file is left out entirely and the analysis runs "
+                            f"on {base.name} alone."
+                        ),
+                        payload={"index": -1},
+                    )
+                ],
+                custom_prompt=(
+                    f"Name the column in {base.name} and the column in "
+                    f"{other.name} that identify the same thing."
+                ),
+                skip_effect=f"{other.name} is left out of the analysis.",
+                evidence={
+                    "candidates": [
+                        {
+                            "left": item.left_column,
+                            "right": item.right_column,
+                            "overlap": round(item.overlap, 3),
+                            "rows_after": item.expected_rows,
+                        }
+                        for item in candidates[:5]
+                    ]
+                },
+            )
+            answer = yield decision
+
+            if answer.is_skip:
+                self.note(state, f"{other.name} was left out.")
+                continue
+
+            if answer.is_custom:
+                self.capture_custom(state, decision, answer, category="context")
+                chosen = self._match_from_text(answer.text, candidates)
+                if chosen is None:
+                    self.warn(
+                        state,
+                        f"Those column names did not match anything in the two "
+                        f"files, so {other.name} was left out.",
+                    )
+                    continue
+            else:
+                index = int(answer.payload.get("index", 0))
+                if index < 0:
+                    self.note(state, f"{other.name} was left out.")
+                    continue
+                chosen = candidates[index] if index < len(candidates) else candidates[0]
+
+            result = joining.apply_join(state.frame, other, chosen)
+            state.set_frame(result.frame, self.stage, result.description)
+            if result.fanned_out:
+                self.warn(
+                    state,
+                    f"Joining {other.name} multiplied the rows from "
+                    f"{result.rows_before:,} to {result.rows_after:,}. Totals "
+                    "now count some records more than once.",
+                )
+
+    @staticmethod
+    def _match_from_text(text: str, candidates) -> "object | None":
+        """Pick the candidate whose columns the user named."""
+        lowered = text.casefold()
+        for candidate in candidates:
+            if (
+                candidate.left_column.casefold() in lowered
+                and candidate.right_column.casefold() in lowered
+            ):
+                return candidate
+        for candidate in candidates:
+            if candidate.left_column.casefold() in lowered:
+                return candidate
+        return None
+
+    def _read_one(self, state: PipelineState, path: Path):
+        """Read a single file, whatever format it is."""
+        suffix = path.suffix.lower()
+        if suffix not in SUPPORTED:
+            raise LoadError(f"{suffix or 'that format'} cannot be read.")
+        if suffix in {".xlsx", ".xlsm", ".xls"}:
+            frame = yield from self._load_excel(state, path)
+        else:
+            frame = yield from self._load_text(state, path)
+        return frame
 
     # -- format-specific loading -------------------------------------------
 

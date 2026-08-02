@@ -11,6 +11,7 @@ from pathlib import Path
 
 from pptx import Presentation
 from pptx.dml.color import RGBColor
+from pptx.enum.text import PP_ALIGN
 from pptx.util import Emu, Inches, Pt
 
 from ..core.state import PipelineState
@@ -34,6 +35,7 @@ TILES_PER_ROW = 4
 def write_pptx(state: PipelineState, path: Path, content: ReportContent | None = None) -> Path:
     content = content or build_content(state)
     path.parent.mkdir(parents=True, exist_ok=True)
+    _RTL["on"] = state.language.rtl
 
     presentation = Presentation()
     presentation.slide_width = SLIDE_WIDTH
@@ -79,12 +81,22 @@ def _textbox(slide, left, top, width, height):
     return frame
 
 
+#: Set on the deck when the run is in a right-to-left language.
+_RTL = {"on": False}
+
+
 def _style(paragraph, *, size: int, bold: bool = False, colour=SECONDARY) -> None:
     for run in paragraph.runs:
         run.font.size = Pt(size)
         run.font.bold = bold
         run.font.color.rgb = colour
-        run.font.name = "Calibri"
+        run.font.name = "Arial" if _RTL["on"] else "Calibri"
+    if _RTL["on"]:
+        # PowerPoint shapes and reorders Arabic itself; it needs the direction
+        # flag and the alignment, nothing more.
+        properties = paragraph._p.get_or_add_pPr()
+        properties.set("rtl", "1")
+        paragraph.alignment = PP_ALIGN.RIGHT
 
 
 def _title_slide(presentation, layout, content: ReportContent) -> None:

@@ -100,11 +100,20 @@ def _calendar_builder(date_column: str) -> Builder:
     return build
 
 
-def _profit_builder(revenue: str, cost: str) -> Builder:
+def _profit_builder(revenue: str, cost: str, quantity: str | None = None) -> Builder:
     def build(frame: pd.DataFrame) -> pd.DataFrame:
         result = frame.copy()
         revenue_values = pd.to_numeric(result[revenue], errors="coerce")
         cost_values = pd.to_numeric(result[cost], errors="coerce")
+
+        # A per-unit cost against a whole-order revenue would overstate profit
+        # by the order size. This turns up as soon as cost arrives from a
+        # product file, where it is almost always per unit.
+        if quantity and quantity in result.columns:
+            cost_values = cost_values * pd.to_numeric(
+                result[quantity], errors="coerce"
+            )
+
         result["profit"] = revenue_values - cost_values
         with np.errstate(divide="ignore", invalid="ignore"):
             margin = np.where(
@@ -215,6 +224,18 @@ def suggest_features(
     revenue = _revenue_column(profile)
     cost = _find(profile, "cost", "cogs", "expense", role=Role.MEASURE)
     if revenue and cost:
+        quantity_column = _find(profile, "quantity", "qty", "units", role=Role.MEASURE)
+        # "unit cost" is a rate, not an amount. Subtracting it from an order
+        # total overstates profit by the order size, and this turns up the
+        # moment cost arrives from a product file, where it is almost always
+        # stated per unit.
+        per_unit = "unit" in cost.casefold() or "per_" in cost.casefold()
+        multiplier = quantity_column if per_unit and quantity_column else None
+        formula = (
+            f"{revenue} minus {cost} times {multiplier}"
+            if multiplier
+            else f"{revenue} minus {cost}"
+        )
         suggestions.append(
             FeatureSuggestion(
                 id="profit",
@@ -222,10 +243,10 @@ def suggest_features(
                 question="Which sales actually make money?",
                 reason=(
                     f"{revenue} tells you what came in, not what you kept. Profit "
-                    f"({revenue} minus {cost}) and the margin as a percentage often "
+                    f"({formula}) and the margin as a percentage often "
                     "rank products in the opposite order to revenue alone."
                 ),
-                builder=_profit_builder(revenue, cost),
+                builder=_profit_builder(revenue, cost, multiplier),
                 creates=["profit", "profit_margin_pct"],
             )
         )

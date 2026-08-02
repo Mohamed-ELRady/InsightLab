@@ -21,10 +21,11 @@ CONFIDENCE_COLOURS = {
     "low": theme.STATUS["serious"],
 }
 
-CONFIDENCE_LABELS = {
-    "high": "Strong evidence",
-    "medium": "Worth checking",
-    "low": "Treat as a hint",
+#: Keys into the string catalogue, so the badge follows the run's language.
+CONFIDENCE_KEYS = {
+    "high": "confidence.high",
+    "medium": "confidence.medium",
+    "low": "confidence.low",
 }
 
 
@@ -36,7 +37,7 @@ def is_dark() -> bool:
         return False
 
 
-def show_chart(chart: Chart, *, key: str = "") -> None:
+def show_chart(chart: Chart, *, key: str = "", language=None) -> None:
     """Render a chart with its explanation and a table fallback.
 
     Three of the light-mode series colours sit below 3:1 against the surface, so
@@ -60,7 +61,9 @@ def show_chart(chart: Chart, *, key: str = "") -> None:
     st.caption(chart.description)
 
     if chart.table is not None and not chart.table.empty:
-        with st.expander("See the numbers behind this chart"):
+        from ..core.language import DEFAULT, translate
+
+        with st.expander(translate("chart.numbers", language or DEFAULT)):
             st.dataframe(chart.table, width="stretch", hide_index=True)
 
 
@@ -86,14 +89,17 @@ def kpi_tiles(kpis: list[Kpi], columns: int = 4) -> None:
                 st.caption(kpi.formula)
 
 
-def confidence_badge(confidence: str) -> str:
+def confidence_badge(confidence: str, language=None) -> str:
     """A label for how far a finding can be trusted.
 
     The word carries the meaning and the colour only reinforces it, so the
     badge still reads correctly in greyscale or for a colour-blind reader.
     """
+    from ..core.language import DEFAULT, translate
+
     colour = CONFIDENCE_COLOURS.get(confidence, theme.STATUS["warning"])
-    label = CONFIDENCE_LABELS.get(confidence, confidence.title())
+    key = CONFIDENCE_KEYS.get(confidence)
+    label = translate(key, language or DEFAULT) if key else confidence.title()
     return (
         f'<span style="display:inline-block;padding:2px 9px;border-radius:11px;'
         f'border:1px solid {colour};color:{colour};font-size:0.74rem;'
@@ -101,9 +107,10 @@ def confidence_badge(confidence: str) -> str:
     )
 
 
-def stylesheet() -> str:
+def stylesheet(rtl: bool = False) -> str:
     """Page-level styling, written for both light and dark surfaces."""
-    return """
+    direction = _RTL_RULES if rtl else ""
+    return direction + """
     <style>
       .il-card {
         border: 1px solid rgba(137,135,129,0.28);
@@ -120,8 +127,9 @@ def stylesheet() -> str:
         margin-bottom: 0.5rem;
       }
       .il-fact {
-        border-left: 3px solid #2a78d6;
-        padding: 0.3rem 0 0.3rem 0.7rem;
+        border-inline-start: 3px solid #2a78d6;
+        padding-block: 0.3rem;
+        padding-inline-start: 0.7rem;
         margin-bottom: 0.55rem;
         font-size: 0.88rem;
       }
@@ -134,3 +142,24 @@ def stylesheet() -> str:
       }
     </style>
     """
+
+
+#: Applied when the run is in a right-to-left language. Streamlit lays out
+#: left-to-right, so the direction is flipped at the document level and the
+#: pieces that must stay left-to-right - charts, tables and code - are flipped
+#: back. Numbers and dates read the same way in both directions, so the tables
+#: are deliberately left alone.
+_RTL_RULES = """
+    <style>
+      .stApp, [data-testid="stSidebar"] { direction: rtl; text-align: right; }
+      [data-testid="stMarkdownContainer"] { text-align: right; }
+      .stPlotlyChart, [data-testid="stDataFrame"], [data-testid="stTable"],
+      pre, code { direction: ltr; text-align: left; }
+      [data-testid="stMetricValue"], [data-testid="stMetricLabel"] {
+        direction: rtl; text-align: right;
+      }
+      [data-testid="stChatInput"] textarea { direction: rtl; text-align: right; }
+      .stRadio [data-testid="stMarkdownContainer"] { text-align: right; }
+      ul, ol { padding-inline-start: 1.4rem; padding-inline-end: 0; }
+    </style>
+"""

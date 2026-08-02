@@ -18,6 +18,8 @@ import pandas as pd
 
 from .activity_log import ActivityLog, EventKind
 from .business_memory import BusinessMemory
+from .language import DEFAULT as DEFAULT_LANGUAGE
+from .language import Language
 from .decision import Answer, Decision
 
 
@@ -267,14 +269,18 @@ class PipelineState:
         mode: RunMode = RunMode.INTERACTIVE,
         run_id: str | None = None,
         workspace: Path | None = None,
+        language: "Language | None" = None,
     ) -> None:
         self.run_id = run_id or uuid.uuid4().hex[:12]
         self.mode = mode
+        self.language = language or DEFAULT_LANGUAGE
         self.started_at = datetime.now(timezone.utc)
         self.workspace = workspace
 
         # Source
         self.source_path: Path | None = None
+        #: Further files to join onto the first. Empty for a single-file run.
+        self.extra_paths: list[Path] = []
         self.source_name: str = ""
         self.source_format: str = ""
         self.load_notes: list[str] = []
@@ -417,6 +423,7 @@ class PipelineState:
         return {
             "run_id": self.run_id,
             "mode": self.mode.value,
+            "language": self.language.code,
             "started_at": self.started_at.isoformat(),
             "fingerprint": self.fingerprint or fingerprint(self.raw_frame),
             "period": period,

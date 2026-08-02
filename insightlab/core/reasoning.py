@@ -24,6 +24,8 @@ from typing import Any
 from crewai import Agent, Crew, LLM, Process, Task
 
 from .config import Settings, get_settings
+from .language import DEFAULT as DEFAULT_LANGUAGE
+from .language import Language
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +55,25 @@ class AgentPersona:
 class ReasoningEngine:
     """Builds CrewAI agents and runs single-task crews against them."""
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self, settings: Settings | None = None, language: Language | None = None
+    ) -> None:
         self.settings = settings or get_settings()
+        self.language = language or DEFAULT_LANGUAGE
         self._llm: LLM | None = None
         self._agents: dict[str, Agent] = {}
         self.call_count = 0
         self.failure_count = 0
+
+    def set_language(self, language: Language) -> None:
+        """Switch the language every agent writes in.
+
+        Cached agents are dropped: the language is part of the backstory, so a
+        cached agent would keep writing in the previous one.
+        """
+        if language.code != self.language.code:
+            self.language = language
+            self._agents.clear()
 
     # -- availability ------------------------------------------------------
 
@@ -93,10 +108,13 @@ class ReasoningEngine:
         if llm is None:
             return None
         if key not in self._agents:
+            backstory = f"{persona.backstory}\n\n{HOUSE_STYLE}"
+            if self.language.instruction:
+                backstory += f"\n\n{self.language.instruction}"
             self._agents[key] = Agent(
                 role=persona.role,
                 goal=persona.goal,
-                backstory=f"{persona.backstory}\n\n{HOUSE_STYLE}",
+                backstory=backstory,
                 llm=llm,
                 verbose=False,
                 allow_delegation=False,

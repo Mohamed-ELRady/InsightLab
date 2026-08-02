@@ -18,6 +18,12 @@ kaleido>=0.2.1
 streamlit>=1.37.0
 
 # Reporting
+# Arabic in a PDF needs contextual letter shaping and bidirectional
+# reordering; ReportLab does neither, and fontTools is used to check that a
+# candidate font carries both Arabic letters and Western digits.
+arabic-reshaper>=3.0.0
+python-bidi>=0.4.2
+fonttools>=4.50.0
 python-docx>=1.1.0
 python-pptx>=0.6.23
 reportlab>=4.2.0

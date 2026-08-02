@@ -15,6 +15,7 @@ import streamlit as st
 
 from ..agents.analyst import Answer
 from ..analysis import theme
+from ..core.language import DEFAULT, translate
 from ..core.state import PipelineState
 
 #: Exchanges kept on screen. Older ones stay in the activity log.
@@ -23,26 +24,24 @@ HISTORY_LIMIT = 12
 
 def render(state: PipelineState, supervisor) -> None:
     """Draw the whole conversation area."""
-    st.markdown("#### Ask about your data")
-    st.caption(
-        "We can only answer from what is in your file. Anything we cannot "
-        "work out, we will say so rather than guess."
-    )
+    language = getattr(state, "language", DEFAULT)
+    st.markdown(f"#### {translate('ask.title', language)}")
+    st.caption(translate("ask.caption", language))
 
     history = st.session_state.setdefault("conversation", [])
 
     _suggestions(state, supervisor)
 
-    question = st.chat_input("Ask a question about your data")
+    question = st.chat_input(translate("ask.placeholder", language))
     if question:
-        with st.spinner("Working it out"):
+        with st.spinner(translate("ask.thinking", language)):
             answer = supervisor.ask(question)
         history.append(answer)
         del history[:-HISTORY_LIMIT]
         st.rerun()
 
     for index, answer in enumerate(reversed(history)):
-        _exchange(answer, index)
+        _exchange(answer, index, language)
 
 
 def _suggestions(state: PipelineState, supervisor) -> None:
@@ -55,7 +54,7 @@ def _suggestions(state: PipelineState, supervisor) -> None:
     if not suggestions:
         return
 
-    st.caption("Or start with one of these:")
+    st.caption(translate("ask.suggestions", getattr(state, "language", DEFAULT)))
     columns = st.columns(min(len(suggestions), 2))
     for index, question in enumerate(suggestions):
         with columns[index % len(columns)]:
@@ -68,7 +67,7 @@ def _suggestions(state: PipelineState, supervisor) -> None:
                 st.rerun()
 
 
-def _exchange(answer: Answer, index: int) -> None:
+def _exchange(answer: Answer, index: int, language=DEFAULT) -> None:
     """One question and its answer."""
     with st.chat_message("user"):
         st.markdown(answer.question)
@@ -81,7 +80,7 @@ def _exchange(answer: Answer, index: int) -> None:
         # Showing the reading first: when an answer looks wrong it is usually
         # the question that was read differently, and this is what lets the
         # user see that immediately.
-        st.caption(f"Worked out as: {answer.understood_as}")
+        st.caption(f"{translate('ask.understood', language)}: {answer.understood_as}")
         st.markdown(answer.narrative or answer.headline)
 
         result = answer.result
@@ -100,7 +99,7 @@ def _exchange(answer: Answer, index: int) -> None:
                 config={"displayModeBar": False},
             )
 
-        with st.expander(f"The numbers ({result.row_count:,} rows)"):
+        with st.expander(f"{translate('ask.numbers', language)} ({result.row_count:,})"):
             st.dataframe(result.table, width="stretch", hide_index=True)
 
 
@@ -172,7 +171,8 @@ def _dark() -> bool:
 
 def render_root_cause(state: PipelineState, supervisor) -> None:
     """The "why did that happen" panel."""
-    st.markdown("#### Why did that happen?")
+    language = getattr(state, "language", DEFAULT)
+    st.markdown(f"#### {translate('why.title', language)}")
 
     attribution = st.session_state.get("attribution", "unset")
     if attribution == "unset":
@@ -190,7 +190,7 @@ def render_root_cause(state: PipelineState, supervisor) -> None:
     st.markdown(attribution.describe())
 
     for dimension in attribution.dimensions:
-        with st.expander(f"Broken down by {dimension.column.replace('_', ' ')}"):
+        with st.expander(f"{translate('why.breakdown', language)} {dimension.column.replace('_', ' ')}"):
             st.dataframe(
                 pd.DataFrame(
                     {
@@ -206,7 +206,4 @@ def render_root_cause(state: PipelineState, supervisor) -> None:
                 width="stretch",
                 hide_index=True,
             )
-            st.caption(
-                "These add up exactly to the total movement, so the shares can "
-                "be read as the whole story rather than a sample of it."
-            )
+            st.caption(translate("why.exact", language))

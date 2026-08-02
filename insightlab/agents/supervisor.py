@@ -32,6 +32,7 @@ class Supervisor:
     ) -> None:
         self.state = state
         self.reasoning = reasoning or ReasoningEngine()
+        self.reasoning.set_language(state.language)
         self.agents = agents if agents is not None else build_default_agents(self.reasoning)
 
         # Not part of the pipeline: it answers questions rather than asking

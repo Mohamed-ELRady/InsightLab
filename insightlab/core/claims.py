@@ -128,7 +128,7 @@ MONTHS = {
 QUARTERS = {"q1": 1, "q2": 2, "q3": 3, "q4": 4}
 
 
-def test_claim(claim: Claim, frame: pd.DataFrame, profile) -> Test:
+def evaluate_claim(claim: Claim, frame: pd.DataFrame, profile) -> Test:
     """Check a claim against the data in front of us.
 
     A claim that cannot be tested on this file is not a contradiction - it is
