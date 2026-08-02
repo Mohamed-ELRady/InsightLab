@@ -73,11 +73,46 @@ class KpiAgent(Agent):
         if answer.is_custom and answer.text:
             self._add_custom(state, answer.text)
 
+        self._compare_with_last_time(state)
+
         yield from self._ask_targets(state)
 
-        state.finish_stage(
-            self.stage, f"Calculated {len(state.kpis)} performance measures."
-        )
+        summary = f"Calculated {len(state.kpis)} performance measures."
+        if state.comparison is not None:
+            summary += (
+                f" Compared them with your analysis of "
+                f"{state.comparison.label()}."
+            )
+        state.finish_stage(self.stage, summary)
+
+    # -- against last time -------------------------------------------------
+
+    def _compare_with_last_time(self, state: PipelineState) -> None:
+        """Put these figures against the last run over the same kind of file.
+
+        A figure on its own is a fact; the same figure against last month is a
+        decision. This is what makes the product worth opening a second time.
+        """
+        from ..analysis import comparison as comparison_module
+
+        if not state.fingerprint:
+            state.fingerprint = comparison_module.fingerprint(state.raw_frame)
+        previous = comparison_module.find_previous(state, state.workspace)
+        if previous is None:
+            self.note(
+                state,
+                "This is the first analysis of a file shaped like this, so there "
+                "is nothing yet to compare it against. The next one will be "
+                "measured against this.",
+            )
+            return
+
+        result = comparison_module.compare(state, previous)
+        if result is None:
+            return
+
+        state.comparison = result
+        self.note(state, result.describe(), previous_run=result.previous_run_id)
 
     # -- selection ---------------------------------------------------------
 

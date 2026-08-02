@@ -213,11 +213,13 @@ def build_default_agents(reasoning: ReasoningEngine) -> list[Agent]:
     from .eda import ExploratoryAnalysisAgent
     from .feature_engineering import FeatureEngineeringAgent
     from .insight import InsightAgent
+    from .memory_agent import MemoryAgent
     from .kpi import KpiAgent
     from .report import ReportAgent
 
     return [
         DataLoaderAgent(reasoning),
+        MemoryAgent(reasoning),
         DataUnderstandingAgent(reasoning),
         DataCleaningAgent(reasoning),
         FeatureEngineeringAgent(reasoning),

@@ -286,6 +286,18 @@ def build_fact_base(state) -> FactBase:
         if kpi.unit == "%":
             facts.add_percentage(kpi.value)
 
+    # Figures from the previous run are real facts too. Without them, every
+    # finding about what has changed since last time cites a number that is not
+    # in this file and gets stripped as invented.
+    comparison = getattr(state, "comparison", None)
+    if comparison is not None:
+        for change in comparison.changes:
+            facts.add(change.before)
+            facts.add(change.now)
+            facts.add(change.difference)
+            facts.add_percentage(change.relative * 100)
+            facts.add_percentage(abs(change.difference))
+
     for chart in state.charts:
         facts.add_frame(chart.table)
 

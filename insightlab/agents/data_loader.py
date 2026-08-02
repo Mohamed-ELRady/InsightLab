@@ -156,6 +156,12 @@ class DataLoaderAgent(Agent):
             return
 
         state.raw_frame = frame.copy()
+        # Taken now, from the file as it arrived: cleaning and feature
+        # engineering both change the columns in data-dependent ways, so a
+        # fingerprint taken later would never match a previous run.
+        from ..analysis.comparison import fingerprint
+
+        state.fingerprint = fingerprint(frame)
         state.set_frame(
             frame,
             self.stage,

@@ -52,6 +52,7 @@ class Role(str, Enum):
 #: Pipeline order. The supervisor walks these in sequence.
 STAGES: tuple[tuple[str, str], ...] = (
     ("load", "Loading your data"),
+    ("recall", "Checking what we already know"),
     ("understand", "Understanding the data"),
     ("clean", "Cleaning the data"),
     ("features", "Building new measures"),
@@ -284,6 +285,10 @@ class PipelineState:
         self.profile = DatasetProfile()
         self.engineered_columns: list[str] = []
 
+        # Comparison with earlier runs
+        self.comparison = None
+        self.fingerprint: str = ""
+
         # Findings
         self.focus_axes: list[str] = []
         self.charts: list[Chart] = []
@@ -402,10 +407,19 @@ class PipelineState:
 
     def summary_dict(self) -> dict[str, Any]:
         """JSON-safe snapshot, used for persistence and for the report."""
+        from ..analysis.comparison import fingerprint, period_of
+
+        period = (
+            period_of(self.frame, self.profile).to_dict()
+            if self.frame is not None
+            else {}
+        )
         return {
             "run_id": self.run_id,
             "mode": self.mode.value,
             "started_at": self.started_at.isoformat(),
+            "fingerprint": self.fingerprint or fingerprint(self.raw_frame),
+            "period": period,
             "source": {
                 "name": self.source_name,
                 "format": self.source_format,

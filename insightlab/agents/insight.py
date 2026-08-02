@@ -54,6 +54,10 @@ class InsightAgent(Agent):
 
         insights = self._from_model(state) or self._from_charts(state)
 
+        # A movement since the last run outranks anything in this file alone,
+        # so change findings go to the top rather than competing for a slot.
+        insights = self._changes_since_last_time(state) + insights
+
         # Nothing generated reaches the user unchecked. Grounding, significance,
         # confounding and refutation all run before anything is kept.
         verifier = Verifier(self.reasoning)
@@ -75,6 +79,54 @@ class InsightAgent(Agent):
             self.stage,
             f"Drew {len(state.insights)} conclusions. {verifier.report.describe()}",
         )
+
+    # -- what changed since last time --------------------------------------
+
+    def _changes_since_last_time(self, state: PipelineState) -> list[Insight]:
+        """Turn material movements against the previous run into findings.
+
+        These are the only findings in the product that use information from
+        outside the current file, which makes them both the most valuable and
+        the ones most in need of stating their basis plainly.
+        """
+        comparison = state.comparison
+        if comparison is None:
+            return []
+
+        label = comparison.label()
+        insights: list[Insight] = []
+        for change in comparison.material:
+            direction = "risen" if change.difference > 0 else "fallen"
+            insights.append(
+                Insight(
+                    title=f"{change.name} has {direction} since {label}",
+                    result=change.describe(label),
+                    evidence=(
+                        f"Measured the same way in both analyses"
+                        + (
+                            ", rebased to a monthly figure because the two files "
+                            "cover different lengths of time"
+                            if change.per_period
+                            else ""
+                        )
+                        + "."
+                    ),
+                    interpretation=(
+                        "A movement between two periods is the one thing a single "
+                        "file cannot show you. What it does not say is why - that "
+                        "needs either the breakdown below or something you know "
+                        "about what happened in between."
+                    ),
+                    confidence="high" if abs(change.relative) >= 0.15 else "medium",
+                    action=(
+                        f"Decide whether this movement in {change.name.lower()} "
+                        "was something you did, and whether you want it to "
+                        "continue."
+                    ),
+                    axis="general",
+                )
+            )
+        return insights
 
     # -- generation --------------------------------------------------------
 

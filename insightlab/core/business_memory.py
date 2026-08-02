@@ -12,7 +12,10 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .claims import Claim
 
 
 #: Broad buckets used to group facts when they are shown back to the user.
@@ -28,7 +31,13 @@ CATEGORIES = (
 
 @dataclass
 class Fact:
-    """A single statement about how the user's business works."""
+    """A single statement about how the user's business works.
+
+    ``claim`` is the machine-readable reading of the statement, when we managed
+    to make one. The sentence is always what the user reads; the claim is what
+    lets the fact be tested against new data and applied automatically. A fact
+    with no claim behaves exactly as it always did.
+    """
 
     statement: str
     category: str = "context"
@@ -36,6 +45,13 @@ class Fact:
     source_topic: str = ""
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     recorded_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    claim: "Claim | None" = None
+    #: Set when a later file contradicted this and the owner kept it anyway.
+    disputed: bool = False
+
+    @property
+    def is_testable(self) -> bool:
+        return self.claim is not None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -45,10 +61,14 @@ class Fact:
             "source_stage": self.source_stage,
             "source_topic": self.source_topic,
             "recorded_at": self.recorded_at.isoformat(),
+            "claim": self.claim.to_dict() if self.claim else None,
+            "disputed": self.disputed,
         }
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Fact":
+        from .claims import Claim
+
         recorded = raw.get("recorded_at")
         return cls(
             statement=raw["statement"],
@@ -61,6 +81,8 @@ class Fact:
                 if recorded
                 else datetime.now(timezone.utc)
             ),
+            claim=Claim.from_dict(raw["claim"]) if raw.get("claim") else None,
+            disputed=bool(raw.get("disputed", False)),
         )
 
 
@@ -86,6 +108,7 @@ class BusinessMemory:
         category: str = "context",
         stage: str = "unknown",
         topic: str = "",
+        claim: Any = None,
     ) -> Fact | None:
         """Record a fact. Returns ``None`` if it is blank or already known."""
         cleaned = " ".join(statement.split())
@@ -95,6 +118,10 @@ class BusinessMemory:
             category = "context"
         for existing in self._facts:
             if existing.statement.casefold() == cleaned.casefold():
+                # Re-stating a known fact with structure this time is an
+                # upgrade, not a duplicate.
+                if claim is not None and existing.claim is None:
+                    existing.claim = claim
                 return None
 
         fact = Fact(
@@ -102,9 +129,24 @@ class BusinessMemory:
             category=category,
             source_stage=stage,
             source_topic=topic,
+            claim=claim,
         )
         self._facts.append(fact)
         return fact
+
+    def testable(self) -> list[Fact]:
+        """Facts that can be checked against a dataset."""
+        return [fact for fact in self._facts if fact.is_testable]
+
+    def replace(self, fact_id: str, statement: str, claim: Any = None) -> bool:
+        """Update a fact in place, keeping its id and its history."""
+        for fact in self._facts:
+            if fact.id == fact_id:
+                fact.statement = " ".join(statement.split())
+                fact.claim = claim
+                fact.disputed = False
+                return True
+        return False
 
     def forget(self, fact_id: str) -> bool:
         """Drop a fact by id. Returns True when something was removed."""
