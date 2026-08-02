@@ -34,6 +34,12 @@ class Supervisor:
         self.reasoning = reasoning or ReasoningEngine()
         self.agents = agents if agents is not None else build_default_agents(self.reasoning)
 
+        # Not part of the pipeline: it answers questions rather than asking
+        # them, and runs against finished state rather than advancing it.
+        from .analyst import AnalystAgent
+
+        self.analyst = AnalystAgent(self.reasoning)
+
         self._flow: Iterator[Decision] | None = None
         self._pending: Decision | None = None
         self._finished = False
@@ -97,6 +103,32 @@ class Supervisor:
         answer._decision = self._pending
         self.state.record_answer(self._pending, answer)
         return self._advance(answer)
+
+    # -- questions ---------------------------------------------------------
+
+    def ask(self, question: str):
+        """Answer a question against the state, without advancing a stage.
+
+        The pipeline runs forwards only, which is right for an analysis and
+        wrong for a conversation. This is the second entry point: it reads the
+        finished state, plans a calculation, executes it with pandas and
+        returns the answer, touching no stage and consuming no decision. The
+        question and its answer are written to the same activity log as
+        everything else, so the record of the run stays complete.
+        """
+        return self.analyst.answer(self.state, question)
+
+    def suggested_questions(self) -> list[str]:
+        """Follow-up questions this data can actually answer."""
+        return self.analyst.suggest(self.state)
+
+    def explain_change(self, **kwargs):
+        """Break a movement down across every dimension. See ``attribution``."""
+        from ..analysis import attribution
+
+        return attribution.explain(self.state, **kwargs)
+
+    # -- driving -----------------------------------------------------------
 
     def run_to_completion(self, max_steps: int = 500) -> PipelineState:
         """Run the whole pipeline, answering every decision automatically.

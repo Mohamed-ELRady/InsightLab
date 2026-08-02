@@ -19,7 +19,7 @@ if __package__ in (None, ""):  # pragma: no cover - direct `streamlit run` entry
 
 from insightlab.agents.supervisor import Supervisor
 from insightlab.analysis.exploration import AXES
-from insightlab.app import decision_panel, theming
+from insightlab.app import conversation, decision_panel, theming
 from insightlab.core.config import PROJECT_ROOT, get_settings
 from insightlab.core.state import (
     STAGES,
@@ -292,7 +292,8 @@ def begin(uploaded, mode: RunMode, reuse: Path | None) -> None:
 
 
 def reset() -> None:
-    for key in ("state", "supervisor", "pending"):
+    for key in ("state", "supervisor", "pending", "conversation",
+                "suggested_questions", "attribution"):
         st.session_state.pop(key, None)
 
 
@@ -355,6 +356,7 @@ def results(state: PipelineState) -> None:
 
     tabs = st.tabs(
         [
+            "Ask a question",
             "Dashboards",
             "What the data shows",
             "Headline figures",
@@ -365,19 +367,24 @@ def results(state: PipelineState) -> None:
         ]
     )
 
+    supervisor = st.session_state.supervisor
     with tabs[0]:
-        dashboards_tab(state)
+        conversation.render(state, supervisor)
+        st.divider()
+        conversation.render_root_cause(state, supervisor)
     with tabs[1]:
-        insights_tab(state)
+        dashboards_tab(state)
     with tabs[2]:
-        kpis_tab(state)
+        insights_tab(state)
     with tabs[3]:
-        charts_tab(state)
+        kpis_tab(state)
     with tabs[4]:
-        data_tab(state)
+        charts_tab(state)
     with tabs[5]:
-        log_tab(state)
+        data_tab(state)
     with tabs[6]:
+        log_tab(state)
+    with tabs[7]:
         downloads_tab(state)
 
 
