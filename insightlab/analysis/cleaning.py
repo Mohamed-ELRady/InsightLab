@@ -25,6 +25,11 @@ MIN_ROWS_FOR_OUTLIERS = 30
 #: Above this share of flagged rows the "outliers" are really the distribution.
 MAX_OUTLIER_SHARE = 0.15
 
+#: Suffix of the marker column added when outliers are kept but flagged. Named
+#: here so that anything analysing the data can tell our own bookkeeping apart
+#: from a real business column.
+UNUSUAL_SUFFIX = "_is_unusual"
+
 
 @dataclass
 class Operation:
@@ -253,7 +258,7 @@ def flag_outliers(frame: pd.DataFrame, report: OutlierReport) -> Operation:
     """Mark the rows without touching the numbers."""
     result = frame.copy()
     values = pd.to_numeric(result[report.column], errors="coerce")
-    flag_name = f"{report.column}_is_unusual"
+    flag_name = f"{report.column}{UNUSUAL_SUFFIX}"
     result[flag_name] = (
         (values < report.lower_bound) | (values > report.upper_bound)
     ).fillna(False)

@@ -209,7 +209,8 @@ def _range_with_label_room(values: list[float]) -> list[float] | None:
 
 
 def _wrap(figure: go.Figure, chart_id: str, title: str, kind: str, description: str,
-          axis: str, table: pd.DataFrame) -> Chart:
+          axis: str, table: pd.DataFrame, *, group_column: str = "",
+          measure: str = "", aggregation: str = "") -> Chart:
     return Chart(
         id=chart_id,
         title=title,
@@ -218,6 +219,9 @@ def _wrap(figure: go.Figure, chart_id: str, title: str, kind: str, description: 
         axis=axis,
         figure_json=figure.to_json(),
         table=table,
+        group_column=group_column,
+        measure=measure,
+        aggregation=aggregation,
     )
 
 
@@ -424,6 +428,9 @@ def category_bar(
         lead + tail,
         axis,
         table,
+        group_column=category,
+        measure=measure,
+        aggregation=how,
     )
 
 
@@ -621,6 +628,9 @@ def box_by_category(
         description,
         axis,
         summary,
+        group_column=category,
+        measure=measure,
+        aggregation="median",
     )
 
 

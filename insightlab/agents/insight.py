@@ -15,6 +15,7 @@ from ..core.decision import Option
 from ..core.reasoning import AgentPersona
 from ..core.state import Chart, Insight, PipelineState
 from .base import Agent, Flow
+from .verification import Verifier
 
 #: How many insights to aim for. Beyond this they stop being read.
 TARGET_INSIGHTS = 8
@@ -52,16 +53,27 @@ class InsightAgent(Agent):
             return
 
         insights = self._from_model(state) or self._from_charts(state)
+
+        # Nothing generated reaches the user unchecked. Grounding, significance,
+        # confounding and refutation all run before anything is kept.
+        verifier = Verifier(self.reasoning)
+        insights = verifier.verify(state, insights)
         state.insights = insights[:TARGET_INSIGHTS]
 
         if not state.insights:
-            state.finish_stage(self.stage, "No conclusion could be drawn from the charts.")
+            state.finish_stage(
+                self.stage,
+                "No conclusion survived checking. The charts are still accurate; "
+                "the differences in them are not large enough to draw a "
+                "conclusion from.",
+            )
             return
 
         yield from self._challenge(state)
 
         state.finish_stage(
-            self.stage, f"Drew {len(state.insights)} conclusions from the analysis."
+            self.stage,
+            f"Drew {len(state.insights)} conclusions. {verifier.report.describe()}",
         )
 
     # -- generation --------------------------------------------------------

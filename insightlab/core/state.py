@@ -127,7 +127,13 @@ class DatasetProfile:
 
 @dataclass
 class Insight:
-    """A business conclusion with the evidence that supports it."""
+    """A business conclusion with the evidence that supports it.
+
+    ``caveat`` carries a confounding variable that changes how the finding
+    should be read; ``objection`` carries what an adversarial review of it
+    found. Both are shown to the user rather than used to silently delete the
+    finding - a reader who can see the objection can judge it.
+    """
 
     title: str
     result: str
@@ -137,6 +143,9 @@ class Insight:
     action: str = ""
     axis: str = "general"
     chart_id: str = ""
+    caveat: str = ""
+    objection: str = ""
+    grounded: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -148,6 +157,9 @@ class Insight:
             "action": self.action,
             "axis": self.axis,
             "chart_id": self.chart_id,
+            "caveat": self.caveat,
+            "objection": self.objection,
+            "grounded": self.grounded,
         }
 
 
@@ -177,7 +189,12 @@ class Kpi:
 
 @dataclass
 class Chart:
-    """A figure produced during exploration, kept with its own explanation."""
+    """A figure produced during exploration, kept with its own explanation.
+
+    ``group_column``, ``measure`` and ``aggregation`` record the comparison the
+    chart makes, so it can be re-tested for significance and for a confounding
+    third variable without having to guess what it was comparing.
+    """
 
     id: str
     title: str
@@ -186,6 +203,14 @@ class Chart:
     axis: str = "general"
     figure_json: str = ""
     table: pd.DataFrame | None = field(default=None, repr=False)
+    group_column: str = ""
+    measure: str = ""
+    aggregation: str = ""
+
+    @property
+    def is_comparison(self) -> bool:
+        """Whether this chart claims one group differs from another."""
+        return bool(self.group_column and self.measure)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -194,6 +219,9 @@ class Chart:
             "kind": self.kind,
             "description": self.description,
             "axis": self.axis,
+            "group_column": self.group_column,
+            "measure": self.measure,
+            "aggregation": self.aggregation,
         }
 
 
