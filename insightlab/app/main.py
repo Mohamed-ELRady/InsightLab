@@ -67,7 +67,9 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    st.markdown(theming.stylesheet(language().rtl), unsafe_allow_html=True)
+    st.markdown(
+        theming.stylesheet(language().rtl, theming.is_dark()), unsafe_allow_html=True
+    )
 
     sidebar()
     if "supervisor" not in st.session_state:
@@ -120,12 +122,28 @@ def sidebar() -> None:
                     "and written from templates rather than tailored to you."
                 )
 
+        st.divider()
+        appearance()
+
         previous = list_runs()
         if previous:
             st.divider()
             st.markdown(f"**{t('sidebar.earlier')}**")
             for run in previous[:5]:
                 st.caption(run.name)
+
+
+def appearance() -> None:
+    """Say which mode is active and where the switch is.
+
+    Streamlit has no API for setting the theme from inside the app - it lives
+    in the built-in menu, which almost nobody finds. Both modes are configured,
+    so the switch works properly; this just points at it.
+    """
+    dark = theming.is_dark()
+    current = t("sidebar.appearance.dark" if dark else "sidebar.appearance.light")
+    st.markdown(f"**{t('sidebar.appearance')}** · {current}")
+    st.caption(t("sidebar.appearance.hint"))
 
 
 def stage_list() -> None:
@@ -449,7 +467,9 @@ def dashboards_tab(state: PipelineState) -> None:
         if chart is None:
             continue
         with columns[index % 2]:
-            theming.show_chart(chart, key=f"dash_{board.id}_{chart.id}")
+            theming.show_chart(
+                chart, key=f"dash_{board.id}_{chart.id}", language=language()
+            )
 
 
 def insights_tab(state: PipelineState) -> None:
@@ -489,7 +509,11 @@ def insights_tab(state: PipelineState) -> None:
             chart = state.chart(insight.chart_id) if insight.chart_id else None
             if chart is not None:
                 with st.expander("See the chart behind this"):
-                    theming.show_chart(chart, key=f"insight_{insight.chart_id}")
+                    theming.show_chart(
+                        chart,
+                        key=f"insight_{insight.chart_id}",
+                        language=language(),
+                    )
 
 
 def kpis_tab(state: PipelineState) -> None:
@@ -523,7 +547,7 @@ def charts_tab(state: PipelineState) -> None:
     columns = st.columns(2, gap="large")
     for index, chart in enumerate(shown):
         with columns[index % 2]:
-            theming.show_chart(chart, key=f"all_{chart.id}")
+            theming.show_chart(chart, key=f"all_{chart.id}", language=language())
 
 
 def data_tab(state: PipelineState) -> None:

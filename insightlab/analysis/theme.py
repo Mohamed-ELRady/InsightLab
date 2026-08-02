@@ -189,24 +189,63 @@ def style(
 def retheme(figure: go.Figure, dark: bool) -> go.Figure:
     """Re-apply chrome for the opposite mode without rebuilding the figure.
 
-    Dark mode is a selected set of steps from the same ramps, not an automatic
-    inversion, so the categorical colours are remapped slot for slot.
+    Figures are built once against the light palette and stored, so switching
+    modes has to move every colour a builder set, not only the series hues.
+    The ones that are easy to miss are the ones that fail worst: a value label
+    left at the light secondary ink is near-invisible on the dark surface, and
+    the surface-coloured ring separating overlapping dots becomes a white halo.
     """
     source = CATEGORICAL_LIGHT if dark else CATEGORICAL_DARK
     target = CATEGORICAL_DARK if dark else CATEGORICAL_LIGHT
-    mapping = {a.casefold(): b for a, b in zip(source, target)}
+    series = {a.casefold(): b for a, b in zip(source, target)}
+
+    from_tokens = LIGHT if dark else DARK
+    to_tokens = DARK if dark else LIGHT
+    # Chrome colours a builder may have baked into a trace. Muted is the same
+    # in both modes by design, so it is deliberately absent.
+    chrome = {
+        str(from_tokens[role]).casefold(): to_tokens[role]
+        for role in ("surface", "primary", "secondary", "grid", "axis")
+    }
+    swap = {**series, **chrome}
+
+    def remap(value):
+        if isinstance(value, str):
+            return swap.get(value.casefold())
+        return None
 
     for trace in figure.data:
         marker = getattr(trace, "marker", None)
-        if marker is not None and isinstance(getattr(marker, "color", None), str):
-            replacement = mapping.get(marker.color.casefold())
+        if marker is not None:
+            replacement = remap(getattr(marker, "color", None))
             if replacement:
-                trace.marker.color = replacement
+                marker.color = replacement
+            # The ring that separates overlapping dots is the surface colour.
+            marker_line = getattr(marker, "line", None)
+            if marker_line is not None:
+                replacement = remap(getattr(marker_line, "color", None))
+                if replacement:
+                    marker_line.color = replacement
+
         line = getattr(trace, "line", None)
-        if line is not None and isinstance(getattr(line, "color", None), str):
-            replacement = mapping.get(line.color.casefold())
+        if line is not None:
+            replacement = remap(getattr(line, "color", None))
             if replacement:
-                trace.line.color = replacement
+                line.color = replacement
+
+        # Value labels sitting outside a bar.
+        textfont = getattr(trace, "textfont", None)
+        if textfont is not None:
+            replacement = remap(getattr(textfont, "color", None))
+            if replacement:
+                textfont.color = replacement
+
+        # A diverging scale needs the dark mode's own neutral midpoint; a grey
+        # chosen against a white page reads as a light blot on a dark one.
+        if getattr(trace, "colorscale", None) is not None and _is_diverging(trace):
+            trace.colorscale = [
+                list(stop) for stop in (DIVERGING_DARK if dark else DIVERGING_LIGHT)
+            ]
 
     return style(
         figure,
@@ -216,6 +255,16 @@ def retheme(figure: go.Figure, dark: bool) -> go.Figure:
         y_title=figure.layout.yaxis.title.text or "",
         height=figure.layout.height or 380,
     )
+
+
+def _is_diverging(trace) -> bool:
+    """Whether a heatmap uses the diverging scale rather than the blue ramp.
+
+    Told apart by the range: a diverging scale is centred on zero and runs to
+    -1, a sequential one starts at zero. Only the diverging one has a neutral
+    midpoint that has to change with the surface.
+    """
+    return getattr(trace, "zmin", None) is not None and trace.zmin < 0
 
 
 def fold_to_other(labels: list[str], values: list[float], limit: int = MAX_SERIES):

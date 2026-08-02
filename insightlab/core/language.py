@@ -155,6 +155,19 @@ STRINGS: dict[str, dict[str, str]] = {
     },
     "sidebar.new_run": {"en": "Start a new analysis", "ar": "ابدأ تحليل جديد"},
     "sidebar.earlier": {"en": "Earlier analyses", "ar": "تحليلات سابقة"},
+    "sidebar.appearance": {"en": "Appearance", "ar": "المظهر"},
+    "sidebar.appearance.light": {"en": "Light", "ar": "فاتح"},
+    "sidebar.appearance.dark": {"en": "Dark", "ar": "داكن"},
+    "sidebar.appearance.hint": {
+        "en": (
+            "Set from the ⋮ menu at the top right → Settings → Choose app "
+            "theme. It follows your system unless you pick one."
+        ),
+        "ar": (
+            "بيتظبط من قائمة ⋮ فوق على اليمين ← Settings ← Choose app theme. "
+            "بيتبع جهازك لحد ما تختار واحد."
+        ),
+    },
     "decision.prompt": {
         "en": "What would you like to do?",
         "ar": "تحب نعمل إيه؟",

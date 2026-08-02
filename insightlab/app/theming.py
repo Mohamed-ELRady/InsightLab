@@ -107,39 +107,47 @@ def confidence_badge(confidence: str, language=None) -> str:
     )
 
 
-def stylesheet(rtl: bool = False) -> str:
-    """Page-level styling, written for both light and dark surfaces."""
+def stylesheet(rtl: bool = False, dark: bool = False) -> str:
+    """Page-level styling, written for both light and dark surfaces.
+
+    The accent on a saved fact is the categorical blue, which is a different
+    step in each mode; the muted ink is the same in both by design. Anything
+    with a surface behind it uses a translucent grey so it sits correctly on
+    either without a second rule.
+    """
     direction = _RTL_RULES if rtl else ""
-    return direction + """
+    accent = theme.series_colour(0, dark)
+    muted = theme.tokens(dark)["muted"]
+    return direction + f"""
     <style>
-      .il-card {
+      .il-card {{
         border: 1px solid rgba(137,135,129,0.28);
         border-radius: 12px;
         padding: 1.1rem 1.25rem;
         margin-bottom: 0.9rem;
-      }
-      .il-card h4 { margin: 0 0 0.35rem 0; font-size: 1.02rem; }
-      .il-muted { color: #898781; font-size: 0.86rem; }
-      .il-question {
+      }}
+      .il-card h4 {{ margin: 0 0 0.35rem 0; font-size: 1.02rem; }}
+      .il-muted {{ color: {muted}; font-size: 0.86rem; }}
+      .il-question {{
         font-size: 1.12rem;
         font-weight: 600;
         line-height: 1.45;
         margin-bottom: 0.5rem;
-      }
-      .il-fact {
-        border-inline-start: 3px solid #2a78d6;
+      }}
+      .il-fact {{
+        border-inline-start: 3px solid {accent};
         padding-block: 0.3rem;
         padding-inline-start: 0.7rem;
         margin-bottom: 0.55rem;
         font-size: 0.88rem;
-      }
-      .il-tag {
+      }}
+      .il-tag {{
         display: inline-block;
         font-size: 0.7rem;
         text-transform: uppercase;
         letter-spacing: 0.06em;
-        color: #898781;
-      }
+        color: {muted};
+      }}
     </style>
     """
 

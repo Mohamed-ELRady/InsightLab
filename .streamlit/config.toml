@@ -1,9 +1,33 @@
+# Both modes are configured, so the theme switch in the app's own menu moves
+# between two designed appearances rather than between our light theme and
+# Streamlit's default dark one.
+#
+# The dark values are not an inversion of the light ones. They are the surfaces
+# and inks the chart palette in insightlab/analysis/theme.py was validated
+# against, so the interface and the figures on it agree.
+
 [theme]
+base = "light"
 primaryColor = "#2a78d6"
 backgroundColor = "#fcfcfb"
 secondaryBackgroundColor = "#f4f3f0"
 textColor = "#0b0b0b"
-font = "sans serif"
+borderColor = "#e1e0d9"
+linkColor = "#2a78d6"
+font = "sans-serif"
+
+[theme.dark]
+primaryColor = "#3987e5"
+backgroundColor = "#1a1a19"
+secondaryBackgroundColor = "#242423"
+textColor = "#ffffff"
+borderColor = "#2c2c2a"
+linkColor = "#3987e5"
+
+[theme.dark.sidebar]
+backgroundColor = "#141413"
+secondaryBackgroundColor = "#1f1f1e"
+borderColor = "#2c2c2a"
 
 [server]
 maxUploadSize = 200

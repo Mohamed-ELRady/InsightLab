@@ -67,6 +67,12 @@ def _suggestions(state: PipelineState, supervisor) -> None:
                 st.rerun()
 
 
+def _dark() -> bool:
+    from .theming import is_dark
+
+    return is_dark()
+
+
 def _exchange(answer: Answer, index: int, language=DEFAULT) -> None:
     """One question and its answer."""
     with st.chat_message("user"):
@@ -90,7 +96,7 @@ def _exchange(answer: Answer, index: int, language=DEFAULT) -> None:
         if result.is_single_value:
             return
 
-        figure = _figure(result)
+        figure = _figure(result, _dark())
         if figure is not None:
             st.plotly_chart(
                 figure,
@@ -103,8 +109,15 @@ def _exchange(answer: Answer, index: int, language=DEFAULT) -> None:
             st.dataframe(result.table, width="stretch", hide_index=True)
 
 
-def _figure(result) -> go.Figure | None:
-    """A chart for an answer, in the same visual system as everything else."""
+def _figure(result, dark: bool = False) -> go.Figure | None:
+    """A chart for an answer, in the same visual system as everything else.
+
+    Built directly in the current mode. Unlike the exploration charts these
+    are produced on every render and never stored, so there is nothing to
+    convert - and building light then converting would be one more place for
+    a colour to be left behind.
+    """
+    tokens = theme.tokens(dark)
     table = result.table
     if table.shape[1] < 2 or len(table) < 2:
         return None
@@ -124,12 +137,14 @@ def _figure(result) -> go.Figure | None:
                 x=labels,
                 y=numbers,
                 mode="lines+markers",
-                line=dict(color=theme.series_colour(0), width=2),
-                marker=dict(size=8, color=theme.series_colour(0)),
+                line=dict(color=theme.series_colour(0, dark), width=2),
+                marker=dict(size=8, color=theme.series_colour(0, dark)),
                 hovertemplate="%{x}<br>%{y:,.2f}<extra></extra>",
             )
         )
-        theme.style(figure, show_legend=False, y_title=str(value_column), height=320)
+        theme.style(
+            figure, dark=dark, show_legend=False, y_title=str(value_column), height=320
+        )
     else:
         shown = labels[:12][::-1]
         amounts = numbers[:12][::-1]
@@ -138,35 +153,28 @@ def _figure(result) -> go.Figure | None:
                 x=amounts,
                 y=shown,
                 orientation="h",
-                marker=dict(color=theme.series_colour(0), cornerradius=4),
+                marker=dict(color=theme.series_colour(0, dark), cornerradius=4),
                 text=[f"{value:,.0f}" for value in amounts],
                 textposition="outside",
-                textfont=dict(size=11, color=theme.LIGHT["secondary"]),
+                textfont=dict(size=11, color=tokens["secondary"]),
                 hovertemplate="%{y}<br>%{x:,.2f}<extra></extra>",
             )
         )
         theme.style(
             figure,
+            dark=dark,
             show_legend=False,
             x_title=str(value_column),
             height=max(240, 40 * len(shown) + 70),
         )
         figure.update_xaxes(
             showgrid=True,
-            gridcolor=theme.LIGHT["grid"],
+            gridcolor=tokens["grid"],
             range=[min(min(amounts), 0), max(amounts) * 1.18] if amounts else None,
         )
         figure.update_yaxes(showgrid=False)
 
-    if theme.tokens(True) and _dark():
-        theme.retheme(figure, dark=True)
     return figure
-
-
-def _dark() -> bool:
-    from .theming import is_dark
-
-    return is_dark()
 
 
 def render_root_cause(state: PipelineState, supervisor) -> None:
