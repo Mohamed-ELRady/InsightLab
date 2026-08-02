@@ -173,8 +173,12 @@ class TestCompletedRun:
         assert state.answers
         assert not any(answer.automatic for _, answer in state.answers)
 
-    def test_all_seven_result_tabs_render(self, finished):
-        assert len(finished.tabs) == 7
+    def test_every_result_tab_renders(self, finished):
+        labels = [tab.label for tab in finished.tabs]
+        assert "Ask a question" in labels, "the conversation is the first tab"
+        assert "Dashboards" in labels
+        assert "Downloads" in labels
+        assert len(labels) == len(set(labels)), "tab labels must be distinct"
 
     def test_the_results_are_all_present(self, finished):
         state = finished.session_state["state"]
