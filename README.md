@@ -86,6 +86,24 @@ Free limits and model availability belong to each provider and can change. The
 suggested model list is a shortcut, not a lock-in: **Another model ID** is always
 available.
 
+### API credit stays focused on judgement
+
+The model is not called for loading, profiling, cleaning, calculations, charts,
+KPIs or report rendering. A normal run reserves model work for three places
+where language quality matters: the file summary, the written conclusions, and
+the final sceptical review.
+
+Successful model responses are cached against the complete request inside the
+current session. Repeating the same question or rerunning the same UI action
+reuses the exact answer instead of spending credit again; any change in the
+data, prompt, model, language or expected output creates a new request. The
+connection check is capped to a tiny response and a successful check is reused
+for as long as its provider, model, endpoint and key remain unchanged. The
+sidebar shows model tasks sent and repeat tasks avoided.
+
+These savings never skip an analytical check, swap in a weaker model or alter a
+calculated result. They remove duplicated work only.
+
 ## Nothing reaches you unchecked
 
 Four checks stand between a conclusion and the person reading it.

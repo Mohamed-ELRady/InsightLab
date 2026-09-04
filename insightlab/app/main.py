@@ -10,6 +10,7 @@ restarted and replayed on every interaction.
 from __future__ import annotations
 
 import sys
+from collections import OrderedDict
 from pathlib import Path
 
 import streamlit as st
@@ -106,6 +107,8 @@ def sidebar() -> None:
         if "supervisor" in st.session_state:
             stage_list()
             st.divider()
+            model_usage_panel()
+            st.divider()
             memory_panel()
             st.divider()
             if st.button(t("sidebar.new_run"), width="stretch"):
@@ -145,6 +148,21 @@ def appearance() -> None:
     current = t("sidebar.appearance.dark" if dark else "sidebar.appearance.light")
     st.markdown(f"**{t('sidebar.appearance')}** · {current}")
     st.caption(t("sidebar.appearance.hint"))
+
+
+def model_usage_panel() -> None:
+    """Show real request savings without guessing at provider token prices."""
+    reasoning = st.session_state.supervisor.reasoning
+    st.markdown(f"**{t('sidebar.api_usage')}**")
+    if not reasoning.available:
+        st.caption(t("sidebar.api_offline"))
+        return
+
+    st.caption(t("sidebar.api_calls").format(count=reasoning.call_count))
+    if reasoning.cache_hits:
+        st.caption(t("sidebar.api_saved").format(count=reasoning.cache_hits))
+    else:
+        st.caption(t("sidebar.api_cache_ready"))
 
 
 def stage_list() -> None:
@@ -332,7 +350,12 @@ def begin(uploaded, mode: RunMode, reuse: Path | None) -> None:
         state.memory = load_business_memory(reuse)
 
     settings = provider_panel.current_settings()
-    reasoning = ReasoningEngine(settings=settings, language=state.language)
+    response_cache = st.session_state.setdefault("llm_response_cache", OrderedDict())
+    reasoning = ReasoningEngine(
+        settings=settings,
+        language=state.language,
+        response_cache=response_cache,
+    )
     supervisor = Supervisor(state, reasoning=reasoning)
     st.session_state.state = state
     st.session_state.supervisor = supervisor

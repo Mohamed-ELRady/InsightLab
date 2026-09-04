@@ -8,6 +8,8 @@ another person's credential.
 
 from __future__ import annotations
 
+import hashlib
+
 import streamlit as st
 
 from ..core.config import PROVIDERS, Settings, get_settings, with_model_access
@@ -15,6 +17,17 @@ from ..core.language import Language
 from ..core.reasoning import ReasoningEngine
 
 CUSTOM_MODEL = "__custom_model__"
+
+
+def _connection_fingerprint(settings: Settings) -> str:
+    """Identify one exact connection setup without retaining another key copy."""
+    parts = (
+        settings.llm_provider,
+        settings.llm_model,
+        settings.llm_base_url or "",
+        settings.api_key or "",
+    )
+    return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
 
 
 def _copy(language: Language, english: str, arabic: str) -> str:
@@ -176,19 +189,34 @@ def render(language: Language) -> Settings:
             st.caption(f"[{link_label}]({spec.key_url})")
 
         settings = current_settings()
+        fingerprint = _connection_fingerprint(settings)
+        previous = st.session_state.get("llm_connection_result")
+        matching = previous if previous and previous[0] == fingerprint else None
+        verified = bool(matching and matching[1])
+
+        button_label = _copy(language, "Test connection", "اختبر الاتصال")
+        if verified:
+            button_label = _copy(language, "Connection verified", "تم تأكيد الاتصال")
         if st.button(
-            _copy(language, "Test connection", "اختبر الاتصال"),
-            disabled=not settings.llm_available,
+            button_label,
+            disabled=not settings.llm_available or verified,
             width="stretch",
             key="test_llm_connection",
         ):
             spinner = _copy(language, "Contacting the provider…", "بنتصل بالمزوّد…")
             with st.spinner(spinner):
                 connected, message = ReasoningEngine(settings).probe()
-            if connected:
-                st.success(_copy(language, "Connection works.", "الاتصال شغال."))
-            else:
-                st.error(message)
+            st.session_state.llm_connection_result = (
+                fingerprint,
+                connected,
+                message,
+            )
+            matching = st.session_state.llm_connection_result
+
+        if matching and matching[1]:
+            st.success(_copy(language, "Connection works.", "الاتصال شغال."))
+        elif matching:
+            st.error(matching[2])
 
         if not settings.llm_available and not settings.offline:
             st.info(
@@ -204,6 +232,13 @@ def render(language: Language) -> Settings:
                 language,
                 "Keys entered here last for this app session only and are never saved with a run.",
                 "أي مفتاح تدخله هنا بيفضل للجلسة الحالية بس ومش بيتحفظ مع التحليل.",
+            )
+        )
+        st.caption(
+            _copy(
+                language,
+                "Smart savings is always on: repeated requests reuse the session cache, and a successful connection test is not charged twice.",
+                "التوفير الذكي شغال دايمًا: الطلب المتكرر بيستخدم نتيجة الجلسة، واختبار الاتصال الناجح مش بيتحسب مرتين.",
             )
         )
 

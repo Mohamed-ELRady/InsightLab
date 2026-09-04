@@ -155,6 +155,23 @@ STRINGS: dict[str, dict[str, str]] = {
     },
     "sidebar.new_run": {"en": "Start a new analysis", "ar": "ابدأ تحليل جديد"},
     "sidebar.earlier": {"en": "Earlier analyses", "ar": "تحليلات سابقة"},
+    "sidebar.api_usage": {"en": "API usage", "ar": "استهلاك الـAPI"},
+    "sidebar.api_calls": {
+        "en": "{count} model tasks sent in this run.",
+        "ar": "تم إرسال {count} مهمة للنموذج في التحليل ده.",
+    },
+    "sidebar.api_saved": {
+        "en": "{count} repeated model tasks served from the session cache.",
+        "ar": "تم توفير {count} مهمة متكررة باستخدام نتيجة الجلسة.",
+    },
+    "sidebar.api_cache_ready": {
+        "en": "Session cache is active; repeated work will not use more credit.",
+        "ar": "حفظ نتائج الجلسة شغال؛ تكرار نفس الطلب مش هيستهلك كريديت جديد.",
+    },
+    "sidebar.api_offline": {
+        "en": "No model credit is being used.",
+        "ar": "مفيش أي كريديت بيتستهلك حاليًا.",
+    },
     "sidebar.appearance": {"en": "Appearance", "ar": "المظهر"},
     "sidebar.appearance.light": {"en": "Light", "ar": "فاتح"},
     "sidebar.appearance.dark": {"en": "Dark", "ar": "داكن"},

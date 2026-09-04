@@ -15,11 +15,13 @@ degrades to a competent statistical tool instead of breaking.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
+from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from crewai import Agent, Crew, LLM, Process, Task
 
@@ -56,14 +58,21 @@ class ReasoningEngine:
     """Builds CrewAI agents and runs single-task crews against them."""
 
     def __init__(
-        self, settings: Settings | None = None, language: Language | None = None
+        self,
+        settings: Settings | None = None,
+        language: Language | None = None,
+        response_cache: OrderedDict[str, str] | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.language = language or DEFAULT_LANGUAGE
         self._llm: LLM | None = None
         self._agents: dict[str, Agent] = {}
+        self._response_cache = (
+            response_cache if response_cache is not None else OrderedDict()
+        )
         self.call_count = 0
         self.failure_count = 0
+        self.cache_hits = 0
 
     def set_language(self, language: Language) -> None:
         """Switch the language every agent writes in.
@@ -114,13 +123,18 @@ class ReasoningEngine:
             issue = self.settings.configuration_issue or "Model access is unavailable."
             return False, issue
 
-        llm = self._get_llm()
-        if llm is None:
-            return (
-                False,
-                "The model client could not be created. Check the provider and model ID.",
-            )
         try:
+            # This engine is created only for the connection button. A hard
+            # ceiling keeps verification to a few completion tokens and cannot
+            # affect the model used by the analysis itself.
+            llm = LLM(
+                model=self.settings.model_identifier,
+                api_key=self.settings.api_key,
+                base_url=self.settings.llm_base_url,
+                temperature=0,
+                max_tokens=32,
+                timeout=min(self.settings.llm_timeout, 20),
+            )
             self.call_count += 1
             response = llm.call(
                 messages=[
@@ -169,12 +183,49 @@ class ReasoningEngine:
         persona: AgentPersona,
         instruction: str,
         expected_output: str,
+        *,
+        cache_namespace: str = "text",
+        cache_validator: Callable[[str], bool] | None = None,
     ) -> str | None:
-        """Run one task and return the raw text, or ``None`` on any failure."""
+        """Run one task, reusing an identical successful answer in this session.
+
+        The cache key covers the model, language, full persona, instruction and
+        expected output. A hit therefore changes neither the request nor its
+        answer; it only avoids paying twice when a UI rerun or repeated question
+        asks for the exact same work.
+        """
+        cache_key = self._cache_key(
+            key,
+            persona,
+            instruction,
+            expected_output,
+            cache_namespace,
+        )
+        if cache_key in self._response_cache:
+            self.cache_hits += 1
+            self._response_cache.move_to_end(cache_key)
+            return self._response_cache[cache_key]
+
         agent = self.agent(key, persona)
         if agent is None:
             return None
 
+        text = self._run_task(agent, key, instruction, expected_output)
+        if text and (cache_validator is None or cache_validator(text)):
+            self._response_cache[cache_key] = text
+            self._response_cache.move_to_end(cache_key)
+            while len(self._response_cache) > 128:
+                self._response_cache.popitem(last=False)
+        return text
+
+    def _run_task(
+        self,
+        agent: Agent,
+        key: str,
+        instruction: str,
+        expected_output: str,
+    ) -> str | None:
+        """Execute one uncached model task."""
         task = Task(
             description=instruction,
             expected_output=expected_output,
@@ -196,6 +247,34 @@ class ReasoningEngine:
 
         text = getattr(result, "raw", None) or str(result)
         return text.strip() or None
+
+    def _cache_key(
+        self,
+        key: str,
+        persona: AgentPersona,
+        instruction: str,
+        expected_output: str,
+        cache_namespace: str,
+    ) -> str:
+        """Hash every input that can change a response, including credential scope."""
+        credential_scope = hashlib.sha256(
+            (self.settings.api_key or "").encode("utf-8")
+        ).hexdigest()
+        parts = (
+            self.settings.model_identifier,
+            self.settings.llm_base_url or "",
+            credential_scope,
+            str(self.settings.llm_temperature),
+            self.language.code,
+            cache_namespace,
+            key,
+            persona.role,
+            persona.goal,
+            persona.backstory,
+            instruction,
+            expected_output,
+        )
+        return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
 
     def ask_json(
         self,
@@ -220,6 +299,8 @@ class ReasoningEngine:
             persona,
             full_instruction,
             expected_output="A single valid JSON value and nothing else.",
+            cache_namespace="json",
+            cache_validator=lambda value: parse_json(value) is not None,
         )
         if text is None:
             return None

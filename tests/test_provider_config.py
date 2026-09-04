@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+
 from insightlab.core.config import Settings, with_model_access
 from insightlab.core.reasoning import ReasoningEngine
 
@@ -66,13 +68,146 @@ def test_connection_error_never_echoes_the_api_key(monkeypatch):
     )
     engine = ReasoningEngine(settings)
 
+    captured = {}
+
     class BrokenModel:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
         def call(self, messages):
             raise RuntimeError(f"Rejected credential {secret}")
 
-    monkeypatch.setattr(engine, "_get_llm", lambda: BrokenModel())
+    monkeypatch.setattr("insightlab.core.reasoning.LLM", BrokenModel)
     connected, message = engine.probe()
 
     assert not connected
     assert secret not in message
     assert "[redacted]" in message
+    assert captured["max_tokens"] == 32
+
+
+def test_identical_model_work_is_served_from_the_session_cache(monkeypatch):
+    from insightlab.core.reasoning import AgentPersona
+
+    settings = Settings(
+        llm_provider="groq",
+        llm_model="openai/gpt-oss-120b",
+        api_key="temporary",
+        offline=False,
+    )
+    engine = ReasoningEngine(settings)
+    persona = AgentPersona(role="Analyst", goal="Explain", backstory="Careful")
+    executions = []
+
+    monkeypatch.setattr(engine, "agent", lambda *args: object())
+
+    def run_once(agent, key, instruction, expected_output):
+        executions.append((key, instruction, expected_output))
+        return "A grounded answer."
+
+    monkeypatch.setattr(engine, "_run_task", run_once)
+
+    first = engine.ask("analyst", persona, "Same evidence", "One sentence")
+    second = engine.ask("analyst", persona, "Same evidence", "One sentence")
+
+    assert first == second == "A grounded answer."
+    assert len(executions) == 1
+    assert engine.cache_hits == 1
+
+
+def test_cache_never_reuses_an_answer_for_different_evidence(monkeypatch):
+    from insightlab.core.reasoning import AgentPersona
+
+    settings = Settings(api_key="temporary", offline=False)
+    engine = ReasoningEngine(settings)
+    persona = AgentPersona(role="Analyst", goal="Explain", backstory="Careful")
+    executions = []
+
+    monkeypatch.setattr(engine, "agent", lambda *args: object())
+
+    def echo(agent, key, instruction, expected_output):
+        executions.append(instruction)
+        return instruction
+
+    monkeypatch.setattr(engine, "_run_task", echo)
+
+    assert engine.ask("analyst", persona, "Evidence A", "One sentence") == "Evidence A"
+    assert engine.ask("analyst", persona, "Evidence B", "One sentence") == "Evidence B"
+    assert len(executions) == 2
+    assert engine.cache_hits == 0
+
+
+def test_session_cache_can_be_reused_by_a_new_analysis(monkeypatch):
+    from insightlab.core.reasoning import AgentPersona
+
+    settings = Settings(api_key="temporary", offline=False)
+    persona = AgentPersona(role="Analyst", goal="Explain", backstory="Careful")
+    shared_cache = OrderedDict()
+    executions = []
+
+    first_engine = ReasoningEngine(settings, response_cache=shared_cache)
+    monkeypatch.setattr(first_engine, "agent", lambda *args: object())
+
+    def run_once(agent, key, instruction, expected_output):
+        executions.append(instruction)
+        return "Stable answer"
+
+    monkeypatch.setattr(first_engine, "_run_task", run_once)
+    assert first_engine.ask("analyst", persona, "Same file", "Short") == "Stable answer"
+
+    second_engine = ReasoningEngine(settings, response_cache=shared_cache)
+    monkeypatch.setattr(second_engine, "agent", lambda *args: object())
+    monkeypatch.setattr(second_engine, "_run_task", run_once)
+    assert second_engine.ask("analyst", persona, "Same file", "Short") == "Stable answer"
+
+    assert len(executions) == 1
+    assert second_engine.cache_hits == 1
+
+
+def test_session_cache_is_scoped_to_the_api_credential(monkeypatch):
+    from insightlab.core.reasoning import AgentPersona
+
+    shared_cache = OrderedDict()
+    persona = AgentPersona(role="Analyst", goal="Explain", backstory="Careful")
+    executions = []
+
+    def execute(agent, key, instruction, expected_output):
+        executions.append(instruction)
+        return "Answer"
+
+    for api_key in ("first-key", "second-key"):
+        settings = Settings(api_key=api_key, offline=False)
+        engine = ReasoningEngine(settings, response_cache=shared_cache)
+        monkeypatch.setattr(engine, "agent", lambda *args: object())
+        monkeypatch.setattr(engine, "_run_task", execute)
+        assert engine.ask("analyst", persona, "Same file", "Short") == "Answer"
+
+    assert len(executions) == 2
+
+
+def test_invalid_json_is_not_cached_as_a_good_model_response(monkeypatch):
+    from insightlab.core.reasoning import AgentPersona
+
+    settings = Settings(api_key="temporary", offline=False)
+    engine = ReasoningEngine(settings)
+    persona = AgentPersona(role="Analyst", goal="Plan", backstory="Careful")
+    replies = iter(("not json", '{"answerable": true}'))
+    executions = []
+
+    monkeypatch.setattr(engine, "agent", lambda *args: object())
+
+    def respond(agent, key, instruction, expected_output):
+        executions.append(instruction)
+        return next(replies)
+
+    monkeypatch.setattr(engine, "_run_task", respond)
+
+    assert engine.ask_json("analyst", persona, "Plan this", "{}") is None
+    assert engine.ask_json("analyst", persona, "Plan this", "{}") == {
+        "answerable": True
+    }
+    assert engine.ask_json("analyst", persona, "Plan this", "{}") == {
+        "answerable": True
+    }
+    assert len(executions) == 2
+    assert engine.cache_hits == 1
