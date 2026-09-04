@@ -1,5 +1,6 @@
-# Agent orchestration
-crewai>=0.80.0
+# Agent orchestration. LiteLLM covers Groq/xAI and the provider extras keep
+# Gemini and Anthropic on CrewAI's native adapters.
+crewai[anthropic,google-genai,litellm]>=0.80.0
 
 # Data handling
 pandas>=2.2.0

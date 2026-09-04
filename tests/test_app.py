@@ -56,6 +56,26 @@ class TestLanding:
         start = [button for button in app.button if button.label == "Start the analysis"][0]
         assert start.disabled
 
+    def test_free_and_paid_model_providers_are_available_in_the_gui(self, app):
+        provider = [box for box in app.selectbox if box.label == "Provider"][0]
+        labels = " ".join(provider.options)
+        assert "Groq" in labels
+        assert "Google Gemini" in labels
+        assert "OpenRouter" in labels
+        assert "Cerebras" in labels
+        assert "xAI" in labels
+
+    def test_a_gui_key_is_passed_to_the_run_without_touching_the_environment(
+        self, app, monkeypatch
+    ):
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        app.text_input(key="llm_api_key_groq").set_value("session-only-key").run()
+        start_sample_run(app)
+
+        settings = app.session_state["supervisor"].reasoning.settings
+        assert settings.llm_provider == "groq"
+        assert settings.api_key == "session-only-key"
+
 
 class TestDecisionPanel:
     def test_a_decision_appears_as_soon_as_the_run_starts(self, app):

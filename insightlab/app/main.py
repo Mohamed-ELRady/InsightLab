@@ -19,10 +19,11 @@ if __package__ in (None, ""):  # pragma: no cover - direct `streamlit run` entry
 
 from insightlab.agents.supervisor import Supervisor
 from insightlab.analysis.exploration import AXES
-from insightlab.app import conversation, decision_panel, theming
-from insightlab.core.config import PROJECT_ROOT, get_settings
+from insightlab.app import conversation, decision_panel, provider_panel, theming
+from insightlab.core.config import PROJECT_ROOT
 from insightlab.core.language import ARABIC, ENGLISH, LANGUAGES
 from insightlab.core.language import translate as _t
+from insightlab.core.reasoning import ReasoningEngine
 from insightlab.core.state import (
     STAGES,
     STAGE_TITLES,
@@ -84,8 +85,6 @@ def main() -> None:
 
 
 def sidebar() -> None:
-    settings = get_settings()
-
     with st.sidebar:
         st.markdown("### InsightLab")
 
@@ -113,6 +112,7 @@ def sidebar() -> None:
                 reset()
                 st.rerun()
         else:
+            settings = provider_panel.current_settings()
             st.markdown(f"**{t('sidebar.model')}**")
             st.caption(settings.describe_llm())
             if not settings.llm_available:
@@ -121,6 +121,7 @@ def sidebar() -> None:
                     "built-in statistical rules. The explanations are shorter "
                     "and written from templates rather than tailored to you."
                 )
+            provider_panel.render(language())
 
         st.divider()
         appearance()
@@ -330,7 +331,9 @@ def begin(uploaded, mode: RunMode, reuse: Path | None) -> None:
     if reuse is not None:
         state.memory = load_business_memory(reuse)
 
-    supervisor = Supervisor(state)
+    settings = provider_panel.current_settings()
+    reasoning = ReasoningEngine(settings=settings, language=state.language)
+    supervisor = Supervisor(state, reasoning=reasoning)
     st.session_state.state = state
     st.session_state.supervisor = supervisor
 

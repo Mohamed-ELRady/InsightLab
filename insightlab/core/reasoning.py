@@ -94,6 +94,7 @@ class ReasoningEngine:
                 self._llm = LLM(
                     model=self.settings.model_identifier,
                     api_key=self.settings.api_key,
+                    base_url=self.settings.llm_base_url,
                     temperature=self.settings.llm_temperature,
                     timeout=self.settings.llm_timeout,
                 )
@@ -101,6 +102,44 @@ class ReasoningEngine:
                 logger.warning("Could not build the language model: %s", error)
                 return None
         return self._llm
+
+    def probe(self) -> tuple[bool, str]:
+        """Make one minimal call to verify GUI-supplied model credentials.
+
+        The response content is irrelevant; receiving one proves that the
+        provider, model ID, endpoint and key agree. Credential text is stripped
+        from the error defensively before anything is shown in the interface.
+        """
+        if not self.available:
+            issue = self.settings.configuration_issue or "Model access is unavailable."
+            return False, issue
+
+        llm = self._get_llm()
+        if llm is None:
+            return (
+                False,
+                "The model client could not be created. Check the provider and model ID.",
+            )
+        try:
+            self.call_count += 1
+            response = llm.call(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "Reply with the single word connected.",
+                    }
+                ]
+            )
+        except Exception as error:  # pragma: no cover - requires a live provider
+            self.failure_count += 1
+            message = str(error)
+            if self.settings.api_key:
+                message = message.replace(self.settings.api_key, "[redacted]")
+            message = " ".join(message.split())[:320]
+            return False, f"Connection failed: {message or type(error).__name__}"
+        if response is None or not str(response).strip():
+            return False, "The provider returned an empty response. Check the model ID."
+        return True, "Connection works."
 
     def agent(self, key: str, persona: AgentPersona) -> Agent | None:
         """Return the CrewAI agent for ``key``, building it on first use."""

@@ -1,6 +1,12 @@
 # InsightLab
 
-Data analysis for people who run a business rather than analyse one.
+**A human-in-the-loop AI data analyst that turns CSV and Excel files into
+verified decisions — without letting a language model invent a single number.**
+
+InsightLab profiles and cleans messy business data, finds defensible insights,
+builds KPIs and dashboards, and exports polished PDF, PowerPoint and Word
+reports. It works in English and Arabic, runs with free-tier AI providers, and
+still completes every statistical stage when no API key is present.
 
 You upload your files. At every point where the right answer depends on how
 *your* business works rather than on what the numbers say, the analysis stops,
@@ -31,9 +37,12 @@ answer, so InsightLab asks them, and remembers the answers.
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # then add your API key
 streamlit run insightlab/app/main.py
 ```
+
+Open the **Connect an AI model** panel in the sidebar, choose a provider, paste
+your key and test the connection. The key stays in that app session and is
+never written to disk or saved with an analysis.
 
 There is a sample dataset built in — click **Try it with sample data** to see the
 whole flow without uploading anything.
@@ -54,6 +63,28 @@ and conclusions phrased for your specific situation.
 
 Without a key you get a competent statistical tool. With one you get a
 consultant. Nothing breaks in between.
+
+## Bring your own model from the interface
+
+No configuration file is required for the web app. Choose a provider and model
+from the sidebar, enter the API key, and verify the connection before starting
+the run. Every provider also accepts a custom model ID, so a newly released
+model does not have to wait for a code update.
+
+| Provider | Access | Good starting point |
+|---|---|---|
+| **Groq** | Rate-limited free plan | GPT-OSS 120B |
+| **Google Gemini** | Free tier on selected models | Gemini Flash |
+| **OpenRouter** | Free model router and `:free` variants | Free Models Router |
+| **Cerebras** | Rate-limited free access | GPT-OSS 120B |
+| **xAI / Grok** | Paid API | Grok |
+| **OpenAI** | Paid API | GPT-4.1 mini |
+| **Anthropic** | Paid API | Claude Sonnet |
+| **OpenAI-compatible** | Depends on your endpoint | Any local or hosted model |
+
+Free limits and model availability belong to each provider and can change. The
+suggested model list is a shortcut, not a lock-in: **Another model ID** is always
+available.
 
 ## Nothing reaches you unchecked
 
@@ -248,8 +279,10 @@ for someone with no credentials.
 
 ## Configuration
 
-All settings live in `.env` — see [`.env.example`](.env.example). The provider is
-switchable between OpenAI, Anthropic and Google without touching code.
+The web interface is the easiest path and keeps entered keys in memory for the
+current session only. CLI runs and deployments can still use `.env` — see
+[`.env.example`](.env.example). Supported providers are Groq, Google Gemini,
+OpenRouter, Cerebras, xAI, OpenAI, Anthropic, and any OpenAI-compatible endpoint.
 
 For Arabic PDFs on a machine with no suitable font, point `INSIGHTLAB_ARABIC_FONT`
 at a `.ttf` containing both Arabic letters and Western digits. Without one the
