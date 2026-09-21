@@ -5,8 +5,14 @@ crewai[anthropic,google-genai,litellm]>=0.80.0
 # Data handling
 pandas>=2.2.0
 numpy>=1.26.0
+# Multi-threaded CSV parsing for large uploads; the loader falls back to
+# pandas' C engine for file shapes Arrow does not support.
+pyarrow>=15.0.0
 openpyxl>=3.1.0
 xlrd>=2.0.1
+# Rust-backed Excel reader. Pandas falls back to openpyxl/xlrd for workbook
+# edge cases, while large ordinary workbooks load substantially faster.
+python-calamine>=0.3.0
 
 # Visualisation
 # Plotly alone covers both jobs: interactive figures on screen and, through

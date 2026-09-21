@@ -1,4 +1,4 @@
-"""Insight Agent: turn the charts into conclusions a business can act on.
+"""Insight Agent: turn charts into domain-appropriate, evidence-backed conclusions.
 
 Every insight produced here carries five things: the result, the evidence behind
 it, what it means for the business, how confident we are, and what to do about
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from ..core.decision import Option
 from ..core.reasoning import AgentPersona
+from ..core.adaptive import rank_objects
 from ..core.state import Chart, Insight, PipelineState
 from .base import Agent, Flow
 from .verification import Verifier
@@ -29,14 +30,14 @@ class InsightAgent(Agent):
     title = "Drawing conclusions"
 
     persona = AgentPersona(
-        role="Business consultant",
+        role="Domain-aware insight analyst",
         goal=(
-            "Turn what the charts show into conclusions the owner can act on this "
-            "week, and be honest about which ones are solid and which are hints."
+            "Turn what the charts show into useful domain-appropriate conclusions, "
+            "and be honest about which ones are solid and which are hints."
         ),
         backstory=(
-            "You have spent years explaining numbers to people who run businesses "
-            "and have no interest in statistics. You never state a finding without "
+            "You have spent years explaining numbers to domain experts who are "
+            "not statisticians. You never state a finding without "
             "the figure behind it, you never claim one thing caused another when "
             "the data only shows they moved together, and you always end with what "
             "you would do about it."
@@ -56,12 +57,20 @@ class InsightAgent(Agent):
 
         # A movement since the last run outranks anything in this file alone,
         # so change findings go to the top rather than competing for a slot.
-        insights = self._changes_since_last_time(state) + insights
+        changes = self._changes_since_last_time(state)
+        insights = changes + insights
 
         # Nothing generated reaches the user unchecked. Grounding, significance,
         # confounding and refutation all run before anything is kept.
         verifier = Verifier(self.reasoning)
         insights = verifier.verify(state, insights)
+        # Keep period-over-period movements first; personalise the remaining
+        # findings without weakening that established business priority.
+        verified_changes = [item for item in insights if item in changes]
+        regular = [item for item in insights if item not in changes]
+        insights = verified_changes + rank_objects(
+            regular, profile=state.learning_profile, policy=state.improvement_policy
+        )
         state.insights = insights[:TARGET_INSIGHTS]
 
         if not state.insights:
@@ -144,9 +153,11 @@ class InsightAgent(Agent):
         )
 
         parsed = self.reason(
-            "These are the measured findings from a business owner's own data. "
+            "These are measured findings from the user's dataset. "
             "Every number here is already calculated and correct - your job is "
             "interpretation, not calculation.\n\n"
+            f"Domain: {state.understanding.business_domain}\n"
+            f"Analysis goal: {state.understanding.analysis_goal}\n"
             f"Findings:\n{findings}\n"
             + (f"\nHeadline figures:\n{kpi_lines}\n" if kpi_lines else "")
             + f"{self.memory_block(state)}\n\n"
@@ -154,7 +165,7 @@ class InsightAgent(Agent):
             "this owner does. Rules you must follow:\n"
             "- Quote the actual figure from the findings as the evidence. Never "
             "invent a number that is not above.\n"
-            "- Say what it means for the business, in their language.\n"
+            "- Explain what it means in this dataset's actual domain. Never inject business, revenue, customer or sales language unless the domain is commercial.\n"
             "- Do not claim one thing caused another. This is a single file of "
             "records, so it can only show that things move together.\n"
             "- Set confidence to high only when the finding rests on a large, "
@@ -169,6 +180,7 @@ class InsightAgent(Agent):
                 'means for the business", "confidence": "high|medium|low", '
                 '"action": "one specific thing to do", "axis": "sales"}]'
             ),
+            max_output_tokens=1400,
         )
 
         if not isinstance(parsed, list):
@@ -220,14 +232,19 @@ class InsightAgent(Agent):
         anything new.
         """
         insights: list[Insight] = []
+        ar = state.language.code == "ar"
         for chart in state.charts:
-            action, confidence = self._action_for(chart)
+            business = state.understanding.is_business
+            action, confidence = self._action_for(chart, ar, business)
             insights.append(
                 Insight(
                     title=chart.title,
                     result=chart.description,
-                    evidence=f"Measured from all {len(state.frame):,} rows in your data.",
-                    interpretation=self._interpretation_for(chart),
+                    evidence=(
+                        f"تم القياس من كل صفوف البيانات وعددها {len(state.frame):,}."
+                        if ar else f"Measured from all {len(state.frame):,} rows in your data."
+                    ),
+                    interpretation=self._interpretation_for(chart, ar, business),
                     confidence=confidence,
                     action=action,
                     axis=chart.axis,
@@ -239,76 +256,122 @@ class InsightAgent(Agent):
         return insights
 
     @staticmethod
-    def _interpretation_for(chart: Chart) -> str:
+    def _interpretation_for(chart: Chart, arabic: bool = False, business: bool = True) -> str:
         if chart.kind == "line":
+            if arabic:
+                return "الاتجاه عبر عدة فترات أهم من شهر واحد؛ الحركة المستمرة اتجاه، أما القفزة المنفردة فغالبًا حدث استثنائي."
             return (
                 "The direction matters more than any single month. A run of "
                 "months moving the same way is a trend; one month apart from the "
                 "rest is usually an event."
             )
         if chart.kind == "bar":
+            if not business:
+                return (
+                    "الفروق بين المجموعات تحدد أين يتركز النمط، لكنها لا تثبت أن اسم المجموعة هو سبب الفرق."
+                    if arabic else
+                    "Differences between groups show where the pattern concentrates, but do not prove that the group label caused it."
+                )
+            if arabic:
+                return "تفوق مجموعة واحدة بفارق كبير يعني أن النشاط يعتمد عليها أكثر مما يبدو؛ وده مصدر قوة ومخاطرة في الوقت نفسه."
             return (
                 "Where one group is far ahead of the others, the business depends "
                 "on it more than it may realise. That is a strength and a risk at "
                 "the same time."
             )
         if chart.kind == "histogram":
+            if not business:
+                return (
+                    "شكل التوزيع يوضح ما هو معتاد وما إذا كانت القيم النادرة جزءًا مهمًا من الظاهرة وليست أخطاء تلقائيًا."
+                    if arabic else
+                    "The distribution separates typical observations from rare extremes; rare values may be important events, not automatic errors."
+                )
+            if arabic:
+                return "الفرق بين القيمة المعتادة والمتوسط يوضح هل عدد قليل من السجلات الكبيرة هو الذي يرفع نتيجة النشاط كله."
             return (
                 "The gap between the typical value and the average tells you "
                 "whether a few large records are setting the tone for the whole "
                 "business."
             )
         if chart.kind == "box":
+            if arabic:
+                return "قد يكون لمجموعتين نفس المتوسط لكن بسلوك مختلف تمامًا؛ التفاوت هو الذي يوضح أيهما أكثر استقرارًا."
             return (
                 "Two groups with the same average can behave completely "
                 "differently. The spread is what tells you which one is "
                 "predictable."
             )
         if chart.kind == "heatmap":
+            if not business:
+                return (
+                    "الخريطة تكشف العلاقات والتركيبات الأقوى، ويجب تفسيرها وفق طبيعة المجال وحجم العينة."
+                    if arabic else
+                    "The grid reveals the strongest relationships or combinations, which still need domain context and sample-size checks."
+                )
+            if arabic:
+                return "الفرص تظهر في التركيبات: منتج قوي في منطقة ضعيفة قد يشير إلى مشكلة توزيع وليس ضعف طلب."
             return (
                 "Combinations are where opportunity hides: a strong product in a "
                 "weak region is usually a distribution problem, not a demand one."
             )
+        if arabic:
+            return "تحرك مقياسين معًا يستحق المتابعة، لكنه لا يثبت أن أحدهما تسبب في الآخر."
         return (
             "Two measures moving together is a lead worth following, but it is "
             "not proof that one causes the other."
         )
 
     @staticmethod
-    def _action_for(chart: Chart) -> tuple[str, str]:
+    def _action_for(chart: Chart, arabic: bool = False, business: bool = True) -> tuple[str, str]:
         if chart.kind == "line":
             return (
-                "Check what happened in the peak and the trough month, and see "
-                "whether it was something you did or something outside.",
+                "راجع ما حدث في أعلى وأقل فترة وحدد هل السبب قرار داخلي أم عامل خارجي."
+                if arabic else
+                "Check what happened in the peak and the trough month, and see whether it was something you did or something outside.",
                 "medium",
             )
         if chart.kind == "bar":
+            if not business:
+                return (
+                    "تحقق من حجم كل مجموعة ثم قارن المجموعة الأعلى بالأدنى على مقياس ثانٍ ذي صلة."
+                    if arabic else
+                    "Check each group size, then compare the highest and lowest groups on a second relevant measure.",
+                    "medium",
+                )
             return (
-                "Decide whether to defend the leading group or invest in the ones "
-                "behind it - both are valid, but they need different budgets.",
+                "قرر هل تحافظ على المجموعة المتصدرة أم تستثمر في المجموعات المتأخرة؛ القرارين صحيحين لكن لكل واحد ميزانية مختلفة."
+                if arabic else
+                "Decide whether to defend the leading group or invest in the ones behind it - both are valid, but they need different budgets.",
                 "high",
             )
         if chart.kind == "box":
             return (
-                "Look at the group with the widest spread first: inconsistency is "
-                "usually easier to fix than a low average.",
+                "ابدأ بالمجموعة ذات التفاوت الأكبر؛ علاج عدم الاستقرار غالبًا أسهل من رفع متوسط منخفض."
+                if arabic else
+                "Look at the group with the widest spread first: inconsistency is usually easier to fix than a low average.",
                 "medium",
             )
         if chart.kind == "heatmap":
+            if not business:
+                return (
+                    "تحقق من أقوى علاقة على البيانات الخام وقارنها بالفترات أو المجموعات المختلفة."
+                    if arabic else "Validate the strongest relationship against the raw observations and across periods or groups.",
+                    "medium",
+                )
             return (
-                "Pick the strongest combination and check whether it can be "
-                "repeated elsewhere.",
+                "اختر أقوى تركيبة واختبر إمكانية تكرارها في مناطق أو منتجات أخرى."
+                if arabic else "Pick the strongest combination and check whether it can be repeated elsewhere.",
                 "medium",
             )
         if chart.kind == "scatter":
             return (
-                "Test the relationship on a small scale before assuming it will "
-                "hold.",
+                "اختبر العلاقة على نطاق صغير قبل افتراض أنها ستستمر."
+                if arabic else "Test the relationship on a small scale before assuming it will hold.",
                 "low",
             )
         return (
-            "Compare this against what you expected. The gap is where the "
-            "useful conversation is.",
+            "قارن النتيجة بتوقعاتك؛ الفارق بينهما هو نقطة البداية للقرار."
+            if arabic else "Compare this against what you expected. The gap is where the useful conversation is.",
             "medium",
         )
 
@@ -324,46 +387,56 @@ class InsightAgent(Agent):
         headline = "\n".join(
             f"- {insight.title}: {insight.result}" for insight in state.insights[:5]
         )
+        ar = state.language.code == "ar"
+        business = state.understanding.is_business
 
         decision = self.decide(
-            topic="Checking the conclusions",
+            topic="مراجعة الاستنتاجات" if ar else "Checking the conclusions",
             question=(
-                "Does anything here contradict what you know about your own "
-                "business?"
+                "هل يوجد أي استنتاج يتعارض مع معرفتك بالبيانات أو المجال؟"
+                if ar and not business else
+                "هل يوجد أي استنتاج يتعارض مع معرفتك بنشاطك؟"
+                if ar else
+                "Does anything here contradict what you know about the data or its domain?"
+                if not business else "Does anything here contradict what you know about your own business?"
             ),
             context=(
-                "These are what the numbers say:\n\n"
+                ("دي أهم النتائج اللي الأرقام بتوضحها:\n\n" + f"{headline}\n\n"
+                 "إحنا شايفين المسجل في الملف فقط، لكن إنت تعرف سياق المجال والظروف الحقيقية. لو فيه تفسير أو تعريف ناقص، قوله لنا علشان نصحح التقرير ونفتكره في التحليلات القادمة.")
+                if ar else
+                ("These are what the numbers say:\n\n"
                 f"{headline}\n\n"
-                "We can only see what was recorded in the file. You know what was "
-                "going on at the time - a supplier problem, a shop closed for "
-                "refurbishment, a customer who left. If something below is "
-                "explained by that, telling us now corrects the report and is "
-                "remembered for every future analysis."
+                "We can only see what was recorded in the file. You know the "
+                "domain context, collection conditions and definitions. If a "
+                "missing piece changes a conclusion, telling us now corrects "
+                "the report and can become an approved lesson for later analyses.")
             ),
             suggestion=Option(
-                label="These match what I would expect",
+                label="النتائج متوافقة مع توقعاتي" if ar else "These match what I would expect",
                 rationale=(
-                    "The conclusions go into the report as they are, with their "
-                    "confidence levels unchanged."
+                    "ستدخل الاستنتاجات التقرير كما هي من غير تغيير درجات الثقة."
+                    if ar else "The conclusions go into the report as they are, with their confidence levels unchanged."
                 ),
                 payload={"confirmed": True},
             ),
             alternatives=[
                 Option(
-                    label="Mark them all as needing a closer look",
+                    label="اعتبر كل النتائج محتاجة مراجعة أدق" if ar else "Mark them all as needing a closer look",
                     rationale=(
-                        "Every conclusion is set to low confidence in the report, "
-                        "so nobody acts on them before they are checked."
+                        "سيتم خفض الثقة في كل الاستنتاجات حتى لا يتم اتخاذ قرار قبل مراجعتها."
+                        if ar else "Every conclusion is set to low confidence in the report, so nobody acts on them before they are checked."
                     ),
                     payload={"confirmed": False, "downgrade": True},
                 ),
             ],
             custom_prompt=(
-                "Tell us what is wrong or what we are missing - for example: "
-                "November is always our peak because of a trade fair, or that "
-                "region only has one shop."
+                ("اشرح الخطأ أو المعلومة الناقصة؛ مثلًا: الحد العلمي الصحيح مختلف، أو فترة الرصد كانت غير مكتملة."
+                 if not business else "اشرح الخطأ أو المعلومة الناقصة؛ مثلًا: نوفمبر موسم الذروة بسبب معرض، أو المنطقة دي فيها فرع واحد فقط.")
+                if ar else
+                ("Tell us what is wrong or missing, for example: the accepted domain threshold is different, or the observation period was incomplete."
+                 if not business else "Tell us what is wrong or what we are missing, for example: November is always the peak because of a trade fair, or that region has only one shop.")
             ),
-            skip_effect="The conclusions go into the report exactly as written.",
+            skip_effect=("ستدخل الاستنتاجات التقرير كما هي." if ar else "The conclusions go into the report exactly as written."),
         )
         answer = yield decision
 
@@ -392,11 +465,11 @@ class InsightAgent(Agent):
         )
 
         parsed = self.reason(
-            "You wrote these conclusions from a business owner's data:\n\n"
+            "You wrote these conclusions from a user's dataset:\n\n"
             f"{current}\n\n"
             f'The owner has now told you: "{correction}"'
             f"{self.memory_block(state)}\n\n"
-            "They know their business and you do not, so their explanation wins "
+            "They know the dataset and its domain context, so their explanation wins "
             "over the pattern in the numbers. Return the conclusions their "
             "correction affects, with the interpretation rewritten to account for "
             "it, and the confidence lowered where their explanation means the "
@@ -406,6 +479,7 @@ class InsightAgent(Agent):
                 '[{"number": 1, "interpretation": "rewritten meaning", '
                 '"confidence": "high|medium|low", "action": "revised action"}]'
             ),
+            max_output_tokens=900,
         )
 
         if not isinstance(parsed, list):
@@ -413,12 +487,12 @@ class InsightAgent(Agent):
             # still change something visible, so the affected claims are flagged.
             for insight in state.insights:
                 insight.interpretation += (
-                    f" Note from the owner: {correction}"
+                    f" Note from the user: {correction}"
                 )
             self.note(
                 state,
                 "Your correction was attached to the conclusions and saved to the "
-                "business memory.",
+                "project memory.",
             )
             return
 

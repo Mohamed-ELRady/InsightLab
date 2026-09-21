@@ -114,7 +114,7 @@ def _title_slide(presentation, layout, content: ReportContent) -> None:
 
 def _kpi_slide(presentation, layout, state: PipelineState) -> None:
     slide = presentation.slides.add_slide(layout)
-    _slide_title(slide, "Where the business stands")
+    _slide_title(slide, "What the data shows")
 
     tiles = state.kpis[:8]
     tile_width = Inches(2.9)

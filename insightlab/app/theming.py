@@ -67,7 +67,7 @@ def show_chart(chart: Chart, *, key: str = "", language=None) -> None:
             st.dataframe(chart.table, width="stretch", hide_index=True)
 
 
-def kpi_tiles(kpis: list[Kpi], columns: int = 4) -> None:
+def kpi_tiles(kpis: list[Kpi], columns: int = 4, language=None) -> None:
     """A row of headline figures, each with its formula underneath.
 
     Deliberately no delta badge. Streamlit colours a delta by parsing it as a
@@ -77,16 +77,22 @@ def kpi_tiles(kpis: list[Kpi], columns: int = 4) -> None:
     """
     if not kpis:
         return
+    from ..core.language import DEFAULT, kpi_formula, kpi_meaning, kpi_name
+
+    shown_language = language or DEFAULT
     for start in range(0, len(kpis), columns):
         row = st.columns(columns)
         for slot, kpi in zip(row, kpis[start : start + columns]):
             with slot:
                 st.metric(
-                    label=kpi.name,
+                    label=kpi_name(kpi.name, shown_language),
                     value=kpi.display_value,
-                    help=f"{kpi.formula}\n\n{kpi.interpretation}",
+                    help=(
+                        f"{kpi_formula(kpi.formula, shown_language)}\n\n"
+                        f"{kpi_meaning(kpi.name, kpi.interpretation, shown_language)}"
+                    ),
                 )
-                st.caption(kpi.formula)
+                st.caption(kpi_formula(kpi.formula, shown_language))
 
 
 def confidence_badge(confidence: str, language=None) -> str:
@@ -159,14 +165,76 @@ def stylesheet(rtl: bool = False, dark: bool = False) -> str:
 #: are deliberately left alone.
 _RTL_RULES = """
     <style>
-      .stApp, [data-testid="stSidebar"] { direction: rtl; text-align: right; }
-      [data-testid="stMarkdownContainer"] { text-align: right; }
+      /* Do not put direction on .stApp or the outer sidebar. Streamlit uses
+         those nodes as flex/transition geometry; changing their bidi mode can
+         leave the collapsed sidebar as a 16px column through the page. */
+      [data-testid="stMainBlockContainer"],
+      [data-testid="stSidebarContent"] [data-testid="stVerticalBlock"] {
+        direction: rtl;
+        text-align: right;
+      }
+      [data-testid="stSidebar"] { overflow: hidden !important; }
+      [data-testid="stAppDeployButton"] { display: none; }
+      /* Streamlit owns these two uploader strings and exposes no localisation
+         API. Replace only their visible copy while keeping the native control
+         and its Arabic aria-label intact. */
+      [data-testid="stFileUploaderDropzone"] button [data-testid="stMarkdownContainer"] p,
+      [data-testid="stFileUploaderDropzoneInstructions"] span { font-size: 0; }
+      [data-testid="stFileUploaderDropzone"] button [data-testid="stMarkdownContainer"] p::after {
+        content: "رفع الملفات";
+        font-size: 0.875rem;
+      }
+      [data-testid="stFileUploaderDropzoneInstructions"] span::after {
+        content: "حتى 200MB للملف الواحد • CSV, TSV, TXT, XLSX, XLSM, XLS";
+        font-size: 0.75rem;
+      }
+      [data-testid="stMarkdownContainer"], [data-testid="stCaptionContainer"],
+      [data-testid="stAlertContentInfo"], [data-testid="stAlertContentWarning"],
+      [data-testid="stAlertContentError"], [data-testid="stNotificationContent"] {
+        direction: rtl;
+        text-align: right;
+        unicode-bidi: plaintext;
+      }
+      /* Inputs and their placeholders need their own direction; they do not
+         consistently inherit it from Streamlit's application container. */
+      input, textarea, [contenteditable="true"], [data-baseweb="select"] > div,
+      [data-testid="stFileUploaderDropzone"], [data-testid="stFileUploaderDropzoneInstructions"] {
+        direction: rtl !important;
+        text-align: right !important;
+      }
+      input::placeholder, textarea::placeholder { text-align: right; }
+      [data-baseweb="popover"], [role="listbox"], [role="option"],
+      [data-testid="stTooltipContent"] {
+        direction: rtl;
+        text-align: right;
+      }
+      [data-testid="stTabs"] [role="tablist"] {
+        direction: rtl;
+        justify-content: flex-start;
+      }
+      [data-testid="stTabs"] [role="tab"],
+      [data-testid="stExpander"] summary,
+      [data-testid="stWidgetLabel"],
+      [data-testid="stButton"] button,
+      [data-testid="stDownloadButton"] button,
+      [data-testid="stLinkButton"] a {
+        direction: rtl;
+        text-align: right;
+      }
       .stPlotlyChart, [data-testid="stDataFrame"], [data-testid="stTable"],
-      pre, code { direction: ltr; text-align: left; }
+      pre, code {
+        direction: ltr !important;
+        text-align: left !important;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
       [data-testid="stMetricValue"], [data-testid="stMetricLabel"] {
         direction: rtl; text-align: right;
       }
-      [data-testid="stChatInput"] textarea { direction: rtl; text-align: right; }
+      [data-testid="stChatInput"] textarea,
+      [data-testid="stChatMessage"] { direction: rtl; text-align: right; }
+      .stRadio, [data-testid="stCheckbox"], [data-testid="stButtonGroup"] {
+        direction: rtl;
+      }
       .stRadio [data-testid="stMarkdownContainer"] { text-align: right; }
       ul, ol { padding-inline-start: 1.4rem; padding-inline-end: 0; }
     </style>

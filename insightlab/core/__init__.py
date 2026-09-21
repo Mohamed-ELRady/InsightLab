@@ -2,12 +2,16 @@
 
 from .activity_log import ActivityLog, Event, EventKind
 from .business_memory import BusinessMemory, Fact
-from .config import Settings, get_settings
+from .config import ProviderRoute, Settings, get_settings
 from .decision import Answer, Choice, Decision, Option
 from .reasoning import AgentPersona, ReasoningEngine
+from .project_memory import ImprovementPolicy, LearningCandidate, MemoryItem, Project, ProjectMemoryStore
+from .evaluation import EvaluationResult, evaluate_run
 from .state import (
     Chart,
     ColumnProfile,
+    Clarification,
+    DatasetUnderstanding,
     Dashboard,
     DashboardPanel,
     DatasetProfile,
@@ -29,6 +33,7 @@ __all__ = [
     "BusinessMemory",
     "Fact",
     "Settings",
+    "ProviderRoute",
     "get_settings",
     "Answer",
     "Choice",
@@ -36,8 +41,17 @@ __all__ = [
     "Option",
     "AgentPersona",
     "ReasoningEngine",
+    "LearningCandidate",
+    "ImprovementPolicy",
+    "MemoryItem",
+    "Project",
+    "ProjectMemoryStore",
+    "EvaluationResult",
+    "evaluate_run",
     "Chart",
     "ColumnProfile",
+    "Clarification",
+    "DatasetUnderstanding",
     "Dashboard",
     "DashboardPanel",
     "DatasetProfile",

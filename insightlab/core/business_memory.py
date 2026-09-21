@@ -1,10 +1,10 @@
-"""Shared store for business facts the user tells us.
+"""Shared store for approved project and domain facts the user tells us.
 
-Anything the user states about how their business works - a VIP threshold, a
-peak season, a rule about which rows to ignore - is written here once and read
-by every agent for the rest of the project. There is deliberately one store per
-run rather than one per agent, so a fact stated during cleaning is still known
-when the report is written.
+Anything the user establishes about the data domain—a scientific threshold,
+classification, seasonality, or exclusion rule—is written here once and read by
+every later agent in the same project. There is deliberately one store per run
+rather than one per agent, so a fact stated during cleaning is still known when
+the report is written.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ CATEGORIES = (
 
 @dataclass
 class Fact:
-    """A single statement about how the user's business works.
+    """A single statement about the project, dataset or its real-world domain.
 
     ``claim`` is the machine-readable reading of the statement, when we managed
     to make one. The sentence is always what the user reads; the claim is what
@@ -48,6 +48,15 @@ class Fact:
     claim: "Claim | None" = None
     #: Set when a later file contradicted this and the owner kept it anyway.
     disputed: bool = False
+    status: str = "active"
+    confidence: str = "high"
+    source_type: str = "user"
+    scope: str = "project"
+    columns: list[str] = field(default_factory=list)
+    version: int = 1
+    updated_at: datetime | None = None
+    valid_from: str | None = None
+    valid_to: str | None = None
 
     @property
     def is_testable(self) -> bool:
@@ -63,6 +72,15 @@ class Fact:
             "recorded_at": self.recorded_at.isoformat(),
             "claim": self.claim.to_dict() if self.claim else None,
             "disputed": self.disputed,
+            "status": self.status,
+            "confidence": self.confidence,
+            "source_type": self.source_type,
+            "scope": self.scope,
+            "columns": self.columns,
+            "version": self.version,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "valid_from": self.valid_from,
+            "valid_to": self.valid_to,
         }
 
     @classmethod
@@ -83,6 +101,15 @@ class Fact:
             ),
             claim=Claim.from_dict(raw["claim"]) if raw.get("claim") else None,
             disputed=bool(raw.get("disputed", False)),
+            status=raw.get("status", "active"),
+            confidence=raw.get("confidence", "high"),
+            source_type=raw.get("source_type", "user"),
+            scope=raw.get("scope", "project"),
+            columns=list(raw.get("columns") or []),
+            version=int(raw.get("version", 1)),
+            updated_at=(datetime.fromisoformat(raw["updated_at"]) if raw.get("updated_at") else None),
+            valid_from=raw.get("valid_from"),
+            valid_to=raw.get("valid_to"),
         )
 
 
@@ -91,6 +118,7 @@ class BusinessMemory:
 
     def __init__(self, facts: Iterable[Fact] | None = None) -> None:
         self._facts: list[Fact] = list(facts or [])
+        self._forgotten_ids: set[str] = set()
 
     def __len__(self) -> int:
         return len(self._facts)
@@ -152,7 +180,15 @@ class BusinessMemory:
         """Drop a fact by id. Returns True when something was removed."""
         before = len(self._facts)
         self._facts = [fact for fact in self._facts if fact.id != fact_id]
-        return len(self._facts) < before
+        removed = len(self._facts) < before
+        if removed:
+            self._forgotten_ids.add(fact_id)
+        return removed
+
+    @property
+    def forgotten_ids(self) -> set[str]:
+        """Persist explicit removals without treating scoped retrieval as deletion."""
+        return set(self._forgotten_ids)
 
     def facts(self) -> list[Fact]:
         return list(self._facts)

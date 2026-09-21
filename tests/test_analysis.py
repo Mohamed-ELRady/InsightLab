@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from insightlab.analysis import cleaning, exploration, features, metrics, theme
+from insightlab.analysis import cleaning, custom_charts, exploration, features, metrics, theme
 from insightlab.analysis.profiling import (
     detect_role,
     profile_dataset,
@@ -308,6 +308,71 @@ class TestExploration:
         columns = exploration.resolve_columns(frame, profile)
         assert "month" not in columns.measures
         assert "year" not in columns.measures
+
+
+class TestCustomCharts:
+    @pytest.fixture
+    def frame(self):
+        return pd.DataFrame(
+            {
+                "day": pd.date_range("2025-01-01", periods=60),
+                "region": ["North", "South", "West"] * 20,
+                "status": ["Open", "Closed"] * 30,
+                "amount": np.linspace(10, 600, 60),
+                "depth": np.linspace(2, 30, 60) + np.sin(np.arange(60)),
+            }
+        )
+
+    @pytest.mark.parametrize(
+        ("kind", "x_column", "y_column"),
+        [
+            ("bar", "region", "amount"),
+            ("line", "day", "amount"),
+            ("area", "day", "amount"),
+            ("scatter", "amount", "depth"),
+            ("histogram", "amount", None),
+            ("box", "amount", "region"),
+            ("pie", "region", "amount"),
+            ("heatmap", "region", "status"),
+        ],
+    )
+    def test_every_selectable_chart_has_a_figure_and_table(
+        self, frame, kind, x_column, y_column
+    ):
+        chart = custom_charts.build_custom_chart(
+            frame,
+            chart_id=f"custom_{kind}",
+            kind=kind,
+            x_column=x_column,
+            y_column=y_column,
+            aggregation="sum",
+        )
+
+        assert chart.kind == kind
+        assert chart.axis == "custom"
+        assert chart.figure_json
+        assert chart.table is not None and not chart.table.empty
+
+    def test_an_arabic_custom_chart_gets_arabic_explanation(self, frame):
+        chart = custom_charts.build_custom_chart(
+            frame,
+            chart_id="custom_ar",
+            kind="histogram",
+            x_column="amount",
+            language_code="ar",
+        )
+
+        assert chart.title.startswith("توزيع")
+        assert "يوضح" in chart.description
+
+    def test_a_numeric_chart_rejects_a_text_column(self, frame):
+        with pytest.raises(custom_charts.CustomChartError, match="numeric"):
+            custom_charts.build_custom_chart(
+                frame,
+                chart_id="bad",
+                kind="histogram",
+                x_column="region",
+            )
 
 
 class TestMetrics:

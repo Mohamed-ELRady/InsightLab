@@ -46,20 +46,21 @@ def render(state: PipelineState, supervisor) -> None:
 
 def _suggestions(state: PipelineState, supervisor) -> None:
     """Offer questions this data can answer, so the box is not intimidating."""
+    language = getattr(state, "language", DEFAULT)
     if "suggested_questions" not in st.session_state:
-        with st.spinner("Working out what is worth asking"):
+        with st.spinner(translate("ask.suggestions.thinking", language)):
             st.session_state.suggested_questions = supervisor.suggested_questions()
 
     suggestions = st.session_state.suggested_questions
     if not suggestions:
         return
 
-    st.caption(translate("ask.suggestions", getattr(state, "language", DEFAULT)))
+    st.caption(translate("ask.suggestions", language))
     columns = st.columns(min(len(suggestions), 2))
     for index, question in enumerate(suggestions):
         with columns[index % len(columns)]:
             if st.button(question, key=f"suggested_{index}", width="stretch"):
-                with st.spinner("Working it out"):
+                with st.spinner(translate("ask.thinking", language)):
                     answer = supervisor.ask(question)
                 history = st.session_state.setdefault("conversation", [])
                 history.append(answer)
@@ -182,17 +183,22 @@ def render_root_cause(state: PipelineState, supervisor) -> None:
     language = getattr(state, "language", DEFAULT)
     st.markdown(f"#### {translate('why.title', language)}")
 
+    if not state.understanding.is_business:
+        st.info(
+            "تحليل السبب الجذري بالتجميع غير معروض هنا لأن جمع القياسات الرصدية مثل القوة والعمق والإحداثيات قد ينتج قصة مضللة. استخدم أسئلة التكرار والعلاقات والمقارنات أعلاه بدلًا منه."
+            if language.code == "ar" else
+            "Additive root-cause decomposition is hidden because summing observational measurements such as magnitude, depth or coordinates would create a misleading story. Use frequency, relationship and group-comparison questions instead."
+        )
+        return
+
     attribution = st.session_state.get("attribution", "unset")
     if attribution == "unset":
-        with st.spinner("Breaking the movement down"):
+        with st.spinner(translate("why.thinking", language)):
             attribution = supervisor.explain_change()
         st.session_state.attribution = attribution
 
     if attribution is None:
-        st.info(
-            "Explaining a movement needs a date column and at least three "
-            "periods of data. This file does not have both."
-        )
+        st.info(translate("why.unavailable", language))
         return
 
     st.markdown(attribution.describe())
@@ -203,10 +209,10 @@ def render_root_cause(state: PipelineState, supervisor) -> None:
                 pd.DataFrame(
                     {
                         dimension.column: [item.label for item in dimension.contributions],
-                        "Contribution": [
+                        translate("why.contribution", language): [
                             round(item.change, 2) for item in dimension.contributions
                         ],
-                        "Share of the movement": [
+                        translate("why.share", language): [
                             f"{item.share:.0%}" for item in dimension.contributions
                         ],
                     }

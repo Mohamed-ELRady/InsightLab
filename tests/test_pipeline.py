@@ -14,9 +14,12 @@ from insightlab.agents.data_loader import (
     header_looks_wrong,
     sniff_text_format,
 )
+from insightlab.agents.data_understanding import DataUnderstandingAgent
+from insightlab.agents.supervisor import build_default_agents
 from insightlab.agents.supervisor import Supervisor
 from insightlab.core.decision import Answer, Choice, Option
 from insightlab.core.reasoning import ReasoningEngine, parse_json
+from insightlab.core.language import ARABIC
 from insightlab.core.state import PipelineState, RunMode, StageStatus
 
 
@@ -133,6 +136,37 @@ class TestSupervisor:
         assert supervisor.finished
         assert state.load_notes == ["left"], "the suggestion should have been taken"
 
+    def test_progress_reports_real_substage_work_and_finishes_at_one_hundred(self):
+        class ProgressAgent(Agent):
+            stage = "load"
+            key = "progress"
+
+            def run(self, state):
+                state.begin_stage(self.stage)
+                state.report_progress(self.stage, 0.25, "progress.load.read")
+                state.report_progress(self.stage, 0.75, "progress.load.tidy")
+                state.finish_stage(self.stage)
+                return
+                yield  # pragma: no cover - make this a generator
+
+        state = PipelineState(mode=RunMode.AUTONOMOUS)
+        supervisor = Supervisor(
+            state, agents=[ProgressAgent(ReasoningEngine())]
+        )
+        updates = []
+        supervisor.set_progress_callback(
+            lambda value, stage, detail: updates.append((value, stage, detail))
+        )
+
+        supervisor.run_to_completion()
+
+        values = [value for value, _, _ in updates]
+        details = [detail for _, _, detail in updates]
+        assert values == sorted(values)
+        assert values[-1] == 1.0
+        assert "progress.load.read" in details
+        assert "progress.load.tidy" in details
+
     def test_automatic_answers_are_recorded_as_automatic(self):
         state = PipelineState(mode=RunMode.AUTONOMOUS)
         Supervisor(state, agents=[OneQuestionAgent(ReasoningEngine())]).run_to_completion()
@@ -189,6 +223,127 @@ class TestSupervisor:
 
         assert len(state.log.of_kind(EventKind.DECISION_RAISED)) == 1
         assert len(state.log.of_kind(EventKind.DECISION_ANSWERED)) == 1
+
+    def test_understanding_runs_before_memory_recall(self):
+        stages = [
+            agent.stage for agent in build_default_agents(ReasoningEngine())[:3]
+        ]
+        assert stages == ["load", "understand", "recall"]
+
+
+class TestInitialUnderstanding:
+    @staticmethod
+    def _agent():
+        return DataUnderstandingAgent(ReasoningEngine())
+
+    def test_clear_data_moves_on_without_an_unnecessary_question(self):
+        state = PipelineState(mode=RunMode.INTERACTIVE)
+        state.source_name = "orders.csv"
+        state.frame = pd.DataFrame(
+            {
+                "order_id": ["A1", "A2", "A3"],
+                "sale_date": ["2025-01-01", "2025-01-02", "2025-01-03"],
+                "revenue": [100.0, 120.0, 90.0],
+                "product_category": ["A", "B", "A"],
+            }
+        )
+
+        flow = self._agent().run(state)
+        with pytest.raises(StopIteration):
+            next(flow)
+
+        assert state.stage_status["understand"] is StageStatus.DONE
+        assert state.understanding.subject == "sales transactions"
+        assert state.understanding.confidence == "high"
+        assert state.understanding.questions == []
+
+    def test_ambiguous_data_asks_what_one_row_means(self):
+        state = PipelineState(mode=RunMode.INTERACTIVE)
+        state.source_name = "export.csv"
+        state.frame = pd.DataFrame(
+            {"alpha": [1, 2, 3], "beta": [4, 5, 6]}
+        )
+
+        decision = next(self._agent().run(state))
+
+        assert decision.topic == "What the data represents"
+        assert "what does one row" in decision.question.casefold()
+        assert state.understanding.confidence == "low"
+
+    def test_understanding_is_saved_in_the_run_summary(self):
+        state = PipelineState(mode=RunMode.INTERACTIVE)
+        state.source_name = "orders.csv"
+        state.frame = pd.DataFrame(
+            {
+                "order_id": ["A1", "A2"],
+                "sale_amount": [10.0, 20.0],
+            }
+        )
+        flow = self._agent().run(state)
+        with pytest.raises(StopIteration):
+            next(flow)
+
+        saved = state.summary_dict()["understanding"]
+        assert saved["row_represents"]
+        assert saved["summary"]
+
+    def test_a_material_model_question_is_asked_and_its_answer_is_remembered(self):
+        class QuestionReasoning:
+            available = True
+
+            @staticmethod
+            def ask_json(*args, **kwargs):
+                return {
+                    "business_domain": "sales",
+                    "subject": "sales transactions",
+                    "row_represents": "one order",
+                    "confidence": "high",
+                    "summary": "This file contains one order per row.",
+                    "important_columns": ["order_id", "sale_amount"],
+                    "questions": [
+                        {
+                            "kind": "currency",
+                            "question": "Which currency is sale_amount recorded in?",
+                            "reason": "The report must label money correctly.",
+                            "column": "sale_amount",
+                            "suggested_answer": "",
+                        }
+                    ],
+                }
+
+        state = PipelineState(mode=RunMode.INTERACTIVE)
+        state.source_name = "orders.csv"
+        state.frame = pd.DataFrame(
+            {"order_id": ["A1", "A2"], "sale_amount": [10.0, 20.0]}
+        )
+        flow = DataUnderstandingAgent(QuestionReasoning()).run(state)
+
+        decision = next(flow)
+        assert decision.question == "Which currency is sale_amount recorded in?"
+
+        with pytest.raises(StopIteration):
+            flow.send(Answer.custom(decision, "Egyptian pounds"))
+
+        assert state.understanding.questions[0].answer == "Egyptian pounds"
+        assert any("Egyptian pounds" in fact.statement for fact in state.memory)
+
+    def test_the_offline_first_reading_is_native_arabic(self):
+        state = PipelineState(mode=RunMode.INTERACTIVE, language=ARABIC)
+        state.source_name = "orders.csv"
+        state.frame = pd.DataFrame(
+            {
+                "order_id": ["A1", "A2"],
+                "sale_date": ["2025-01-01", "2025-01-02"],
+                "revenue": [10.0, 20.0],
+            }
+        )
+        flow = self._agent().run(state)
+        with pytest.raises(StopIteration):
+            next(flow)
+
+        assert state.understanding.business_domain == "معاملات المبيعات"
+        assert "عملية بيع" in state.understanding.summary
+        assert "a sale" not in state.understanding.summary
 
 
 # ---------------------------------------------------------------------------

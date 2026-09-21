@@ -34,6 +34,12 @@ MIN_GROUP_ROWS = 20
 #: significance is not the same as mattering.
 MIN_RELATIVE_GAP = 0.05
 
+# Keep bootstrap allocations bounded.  The previous ``(2000, group_size)``
+# arrays could briefly exceed a gigabyte on an otherwise modest upload.  This
+# cap changes neither the samples nor the interval; it only calculates their
+# means in cache-friendly chunks.
+MAX_BOOTSTRAP_VALUES = 2_000_000
+
 Verdict = Literal["solid", "weak", "noise", "too_few"]
 
 
@@ -100,15 +106,39 @@ def _bootstrap_difference(
     indefensible.
     """
     generator = np.random.default_rng(12345)
-    left_draws = generator.choice(left, size=(resamples, len(left)), replace=True)
-    right_draws = generator.choice(right, size=(resamples, len(right)), replace=True)
-    differences = left_draws.mean(axis=1) - right_draws.mean(axis=1)
+    def sampled_means(values: np.ndarray) -> np.ndarray:
+        per_chunk = max(1, MAX_BOOTSTRAP_VALUES // max(len(values), 1))
+        means = np.empty(resamples, dtype=float)
+        for start in range(0, resamples, per_chunk):
+            stop = min(resamples, start + per_chunk)
+            draws = generator.choice(
+                values, size=(stop - start, len(values)), replace=True
+            )
+            means[start:stop] = draws.mean(axis=1)
+        return means
+
+    # Left is completed before right, matching the historical RNG order and
+    # therefore preserving exact intervals for datasets that fit one chunk.
+    differences = sampled_means(left) - sampled_means(right)
 
     tail = (1 - CONFIDENCE) / 2
     return (
         float(np.quantile(differences, tail)),
         float(np.quantile(differences, 1 - tail)),
     )
+
+
+def _normal_mean_difference_interval(
+    left: np.ndarray, right: np.ndarray, difference: float
+) -> tuple[float, float]:
+    """A fast large-sample estimate used only for decisive comparisons."""
+    left_variance = float(left.var(ddof=1)) if len(left) > 1 else 0.0
+    right_variance = float(right.var(ddof=1)) if len(right) > 1 else 0.0
+    standard_error = np.sqrt(
+        left_variance / max(len(left), 1) + right_variance / max(len(right), 1)
+    )
+    margin = 1.96 * float(standard_error)
+    return difference - margin, difference + margin
 
 
 def compare_groups(
@@ -137,6 +167,35 @@ def compare_groups(
             left, right, left_mean, right_mean,
             len(left_values), len(right_values),
             difference, relative, (float("nan"), float("nan")), "too_few",
+        )
+
+    estimate = _normal_mean_difference_interval(left_values, right_values, difference)
+
+    # This verdict is mathematically fixed by the practical-effect rule below,
+    # regardless of what a 2,000-resample bootstrap says.  Avoiding that work is
+    # especially valuable for very large groups and does not change the finding.
+    if abs(relative) < MIN_RELATIVE_GAP:
+        return Comparison(
+            left, right, left_mean, right_mean,
+            len(left_values), len(right_values),
+            difference, relative, estimate, "noise",
+        )
+
+    # For a large, unambiguous effect the normal and bootstrap intervals are
+    # indistinguishable for the decision we make.  Keep a generous 20% safety
+    # band around the solid/weak boundary; borderline findings still take the
+    # full deterministic bootstrap path.
+    estimate_width = estimate[1] - estimate[0]
+    estimate_excludes_zero = estimate[0] > 0 or estimate[1] < 0
+    if (
+        min(len(left_values), len(right_values)) >= 200
+        and estimate_excludes_zero
+        and estimate_width <= abs(difference) * 0.8
+    ):
+        return Comparison(
+            left, right, left_mean, right_mean,
+            len(left_values), len(right_values),
+            difference, relative, estimate, "solid",
         )
 
     interval = _bootstrap_difference(left_values, right_values)

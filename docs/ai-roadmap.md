@@ -19,10 +19,17 @@ a `run()` that yields decisions. Adding a *conversation* is not, because a
 generator pipeline runs forwards only. Conversation needs a second entry point
 into the same state, not another stage.
 
-**`BusinessMemory` is a flat, append-only list of sentences.** It is read into
-prompts and never questioned. Making it structured, contradictable and
-comparable across runs is the single highest-leverage change in the codebase,
-because every other memory feature depends on it.
+**Project memory is now durable and controlled.** The original flat run snapshot
+still exists for portability, while the live SQLite store adds project
+boundaries, status, confidence, scope, related columns, validity periods,
+version history, contradiction state and approval-gated lessons. Explicit
+ratings also form a project-scoped adaptive ordering profile.
+
+**Self-improvement has an evaluation gate.** Each completed run receives a
+deterministic quality score and privacy-reduced structural cases. Ranking
+policies are versioned, checked offline against historical feedback, activated
+only by the owner, and reversible. The system does not rewrite its own code,
+fine-tune a model, or let feedback change calculations.
 
 ## 2. What is missing as a whole subsystem
 
@@ -33,8 +40,8 @@ proposals below.
 |---|---|
 | **Conversation** | The user cannot ask a question. The collaboration the product is named for runs in one direction only. |
 | **Verification** | Nothing checks that a number in a generated sentence exists in the data. One wrong figure destroys trust permanently. |
-| **Semantic / entity layer** | "Customer" is a column name, not an entity. Facts cannot be attached to things, only to runs. |
-| **Temporal layer** | Every run is an island. The product cannot say "down 8% since your last analysis" — the one sentence an owner most wants. |
+| **Semantic / entity layer** | "Customer" is still primarily a column name; memory can be column-scoped but does not yet maintain a full entity graph. |
+| **Temporal layer** | Cross-run KPI comparison exists for matching schemas; richer seasonality and entity-level histories remain future work. |
 
 ## 3. Proposals
 

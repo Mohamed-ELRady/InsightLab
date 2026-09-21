@@ -1,4 +1,4 @@
-"""KPI Agent: the handful of numbers this business should watch.
+"""KPI Agent: the handful of numbers that best describe this dataset.
 
 A KPI is only useful if the person reading it knows what it means and what to do
 when it moves, so each one is presented with the formula behind it and a
@@ -14,11 +14,67 @@ import re
 from ..analysis.metrics import available_kpis, compute_kpis, custom_kpi
 from ..core.decision import Option
 from ..core.reasoning import AgentPersona
+from ..core.adaptive import rank_objects
 from ..core.state import PipelineState, Role
 from .base import Agent, Flow
 
 #: Enough to run a business by, few enough to fit on one screen.
 HEADLINE_COUNT = 6
+
+KPI_NAMES_AR = {
+    "Total revenue": "إجمالي الإيرادات",
+    "Total profit": "إجمالي الأرباح",
+    "Profit margin": "هامش الربح",
+    "Average order value": "متوسط قيمة الطلب",
+    "Growth rate": "معدل النمو",
+    "Strongest month": "أقوى شهر",
+    "Active customers": "العملاء النشطون",
+    "Repeat customer rate": "معدل تكرار العملاء",
+    "Top 10% customer share": "حصة أكبر 10% من العملاء",
+    "Units sold": "الوحدات المباعة",
+    "Number of records": "عدد السجلات",
+    "Number of earthquake events": "عدد الأحداث الزلزالية",
+    "Average magnitude": "متوسط قوة الزلازل",
+    "Median magnitude": "القيمة الوسيطة لقوة الزلازل",
+    "Maximum magnitude": "أقصى قوة مسجلة",
+    "Maximum recorded depth": "أقصى عمق مسجل",
+}
+
+
+def _arabic_kpi_name(name: str) -> str:
+    if name in KPI_NAMES_AR:
+        return KPI_NAMES_AR[name]
+    prefixes = {
+        "Average ": "متوسط ",
+        "Median ": "القيمة الوسيطة لـ",
+        "Maximum ": "أقصى قيمة لـ",
+        "Number of ": "عدد ",
+    }
+    for prefix, translated in prefixes.items():
+        if name.startswith(prefix):
+            return translated + name[len(prefix):]
+    return name
+
+
+def _localize_contextual_kpi(kpi) -> None:
+    original_name = kpi.name
+    formula = kpi.formula
+    kpi.name = _arabic_kpi_name(original_name)
+    if formula == "Count of rows after cleaning":
+        kpi.formula = "عدد الصفوف بعد التنظيف"
+        kpi.interpretation = "عدد الأحداث أو السجلات التي يستند إليها التحليل بعد تطبيق قرارات التنظيف."
+        return
+    translations = {
+        "Average of valid values in ": "متوسط القيم الصالحة في ",
+        "Median of valid values in ": "وسيط القيم الصالحة في ",
+        "Maximum of valid values in ": "أقصى قيمة صالحة في ",
+        "Maximum valid value in ": "أقصى قيمة صالحة في ",
+    }
+    for prefix, translated in translations.items():
+        if formula.startswith(prefix):
+            kpi.formula = translated + formula[len(prefix):]
+            break
+    kpi.interpretation = "ملخص وصفي للقياس داخل هذه البيانات؛ يُقرأ مع التوزيع والسياق وليس كإجمالي قابل للجمع."
 
 
 class KpiAgent(Agent):
@@ -27,16 +83,16 @@ class KpiAgent(Agent):
     title = "Summarising performance"
 
     persona = AgentPersona(
-        role="Performance analyst",
+        role="Domain-aware measurement analyst",
         goal=(
-            "Give the owner the few numbers that actually tell them how the "
-            "business is doing, each one explained well enough to act on."
+            "Choose the few valid numbers that best describe this dataset in "
+            "its detected domain, each explained well enough to use."
         ),
         backstory=(
             "You have seen dashboards with forty metrics that nobody looks at, "
-            "and one number on a whiteboard that changed how a company ran. You "
-            "always show the formula, because a figure an owner cannot reconcile "
-            "against their own books is a figure they will not trust."
+            "and one well-chosen measure that changed how a team understood a "
+            "problem. You always show the formula and never sum a non-additive "
+            "scientific measurement just because it is numeric."
         ),
     )
 
@@ -47,7 +103,7 @@ class KpiAgent(Agent):
             state.skip_stage(self.stage, "There is no data to measure.")
             return
 
-        supported = available_kpis(state.frame, state.profile)
+        supported = available_kpis(state.frame, state.profile, state.understanding)
         if not supported:
             state.skip_stage(
                 self.stage,
@@ -55,6 +111,11 @@ class KpiAgent(Agent):
                 "needs.",
             )
             return
+
+        supported = rank_objects(
+            supported, profile=state.learning_profile,
+            policy=state.improvement_policy, name_attr="name",
+        )
 
         decision = self._selection_decision(state, supported)
         answer = yield decision
@@ -68,10 +129,20 @@ class KpiAgent(Agent):
         else:
             chosen = list(answer.payload.get("ids", []))
 
-        state.kpis = compute_kpis(state.frame, state.profile, chosen)
+        state.kpis = compute_kpis(
+            state.frame, state.profile, chosen, state.understanding
+        )
+        if state.language.code == "ar" and not state.understanding.is_business:
+            for kpi in state.kpis:
+                _localize_contextual_kpi(kpi)
 
         if answer.is_custom and answer.text:
             self._add_custom(state, answer.text)
+
+        state.kpis = rank_objects(
+            state.kpis, profile=state.learning_profile,
+            policy=state.improvement_policy, name_attr="name",
+        )
 
         self._compare_with_last_time(state)
 
@@ -117,43 +188,52 @@ class KpiAgent(Agent):
     # -- selection ---------------------------------------------------------
 
     def _selection_decision(self, state: PipelineState, supported):
-        listing = "\n".join(f"- {item.name}: {item.why}" for item in supported)
+        ar = state.language.code == "ar"
+        business = state.understanding.is_business
+        listing = "\n".join(
+            f"- {_arabic_kpi_name(item.name)}"
+            + ("" if ar else f": {item.why}")
+            for item in supported
+        )
         headline = supported[:HEADLINE_COUNT]
 
         return self.decide(
-            topic="Which measures to track",
-            question="Which numbers do you want on the front page?",
+            topic="المؤشرات المطلوب متابعتها" if ar else "Which measures to track",
+            question="أي أرقام تريد ظهورها في الصفحة الرئيسية؟" if ar else "Which numbers do you want on the front page?",
             context=(
-                "Your data supports these measures. Each one is calculated from "
+                ("بياناتك تدعم المؤشرات التالية. كل مؤشر محسوب من أعمدتك وتظهر طريقة حسابه بجواره:\n\n"
+                 f"{listing}\n\nعدد أقل من المؤشرات الرئيسية يجعل متابعتها واتخاذ قرار منها أسهل.")
+                if ar else
+                ("Your data supports these measures. Each one is calculated from "
                 "your own columns, and the formula is shown next to every figure "
                 "so you can check it against your books:\n\n"
                 f"{listing}\n\n"
                 "Fewer measures on the front page usually means more of them get "
-                "acted on."
+                "acted on.")
             ),
             suggestion=Option(
-                label=f"Use the main {len(headline)}",
+                label=(f"استخدم أهم {len(headline)} مؤشرات" if ar else f"Use the main {len(headline)}"),
                 rationale=(
-                    "Covers what came in, what was kept, the direction of travel "
-                    "and the customer base - enough to run a week by, few enough "
-                    "to read at a glance."
+                    "تغطي الإيرادات والأرباح والاتجاه والعملاء في مجموعة سهلة القراءة."
+                    if ar else "Covers what came in, what was kept, the direction of travel and the customer base - enough to run a week by, few enough to read at a glance."
                 ),
                 payload={"ids": [item.id for item in headline]},
             ),
             alternatives=[
                 Option(
-                    label=f"Use all {len(supported)}",
+                    label=(f"استخدم كل المؤشرات ({len(supported)})" if ar else f"Use all {len(supported)}"),
                     rationale=(
-                        "Nothing is left out. Better when this is a periodic "
-                        "review rather than a daily check."
+                        "لن يتم استبعاد أي مؤشر؛ مناسب للمراجعة الدورية الشاملة."
+                        if ar else "Nothing is left out. Better when this is a periodic review rather than a daily check."
                     ),
                     payload={"ids": [item.id for item in supported]},
                 ),
+            ] + ([
                 Option(
-                    label="Money only",
+                    label="المؤشرات المالية فقط" if ar else "Money only",
                     rationale=(
-                        "Revenue, profit and margin. The narrowest useful set "
-                        "when the only question is financial."
+                        "الإيرادات والأرباح والهامش فقط."
+                        if ar else "Revenue, profit and margin. The narrowest useful set when the only question is financial."
                     ),
                     payload={
                         "ids": [
@@ -165,10 +245,10 @@ class KpiAgent(Agent):
                     },
                 ),
                 Option(
-                    label="Customers only",
+                    label="مؤشرات العملاء فقط" if ar else "Customers only",
                     rationale=(
-                        "Base size, repeat rate and concentration. Use when the "
-                        "question is about retention rather than sales."
+                        "حجم قاعدة العملاء ومعدل التكرار والتركيز."
+                        if ar else "Base size, repeat rate and concentration. Use when the question is about retention rather than sales."
                     ),
                     payload={
                         "ids": [
@@ -178,13 +258,17 @@ class KpiAgent(Agent):
                         ]
                     },
                 ),
-            ],
+            ] if business else []),
             custom_prompt=(
-                "Does your company rely on any specific measures of its own? "
-                "Describe them and which columns they come from, for example: "
-                "collection rate is payments received divided by revenue."
+                "هل يوجد مقياس أو حد مهم في هذا المجال؟ اشرحه وحدد الأعمدة المستخدمة."
+                if ar and not business else
+                "هل يعتمد نشاطك على مؤشر خاص؟ اشرحه وحدد الأعمدة المستخدمة؛ مثل: معدل التحصيل = المدفوعات ÷ الإيرادات."
+                if ar else
+                "Is there a field-specific measure or threshold you want tracked? Describe it and the columns it uses."
+                if not business else
+                "Does your company rely on any specific measures of its own? Describe them and which columns they come from, for example: collection rate is payments received divided by revenue."
             ),
-            skip_effect="The standard set of measures is used.",
+            skip_effect=("سيتم استخدام مجموعة المؤشرات القياسية." if ar else "The standard set of measures is used."),
             evidence={"supported": [item.id for item in supported]},
         )
 
@@ -201,7 +285,7 @@ class KpiAgent(Agent):
             return
 
         parsed = self.reason(
-            f'A business owner described a measure their company tracks: "{text}"\n\n'
+            f'A user described a domain-specific measure they want to track: "{text}"\n\n'
             f"These numeric columns are available: {', '.join(numeric)}."
             f"{self.memory_block(state)}\n\n"
             "Express their measure as a total of one column, or one column "
@@ -211,6 +295,7 @@ class KpiAgent(Agent):
                 '[{"name": "Collection rate", "numerator": "payments", '
                 '"denominator": "revenue", "as_percentage": true}]'
             ),
+            max_output_tokens=600,
         )
 
         definitions = parsed if isinstance(parsed, list) else self._guess_custom(text, numeric)
@@ -235,7 +320,7 @@ class KpiAgent(Agent):
         else:
             self.note(
                 state,
-                "Your measure was saved to the business memory. It could not be "
+                "Your measure was saved to the project memory. It could not be "
                 "calculated from the columns in this file, so it does not appear "
                 "as a figure.",
             )
@@ -270,40 +355,49 @@ class KpiAgent(Agent):
         """Ask what good looks like.
 
         A number with no target is a fact; a number with a target is a decision.
-        Targets are saved to the business memory so later runs can say whether
-        the business is on track rather than just reporting the figure again.
+        Targets are saved to project memory so later runs can compare against
+        them rather than merely reporting the figure again.
         """
         if not state.kpis:
             return
 
+        ar = state.language.code == "ar"
+        business = state.understanding.is_business
         listing = "\n".join(
-            f"- {kpi.name}: {kpi.display_value}" for kpi in state.kpis[:HEADLINE_COUNT]
+            f"- {_arabic_kpi_name(kpi.name) if ar else kpi.name}: {kpi.display_value}"
+            for kpi in state.kpis[:HEADLINE_COUNT]
         )
         decision = self.decide(
-            topic="What good looks like",
-            question="Do you have targets for any of these?",
+            topic="الأهداف المطلوبة" if ar else "What good looks like",
+            question="هل عندك أهداف محددة لأي مؤشر من دول؟" if ar else "Do you have targets for any of these?",
             context=(
-                "Here is where the business currently stands:\n\n"
-                f"{listing}\n\n"
-                "If you tell us what you are aiming for, the report can say "
-                "whether you are ahead or behind rather than just stating the "
-                "figure. Targets are remembered, so the next analysis of newer "
-                "data can compare against them."
+                (("ده الوضع الحالي للنشاط:" if business else "ده ملخص القياسات الحالية:")
+                 + "\n\n" + f"{listing}\n\n"
+                 + "لو شاركت أهدافك أو الحدود المهمة، يقدر التقرير يقارن النتائج بها. هتتحفظ للتحليلات القادمة.")
+                if ar else
+                (("Here is where the business currently stands:\n\n" if business else "Here are the current measurements:\n\n")
+                + f"{listing}\n\n"
+                "If you provide a target or meaningful threshold, the report "
+                "can compare the result against it rather than only stating the "
+                "figure. It is remembered for later analyses.")
             ),
             suggestion=Option(
-                label="No targets - just report the figures",
+                label="مفيش أهداف — اعرض الأرقام فقط" if ar else "No targets - just report the figures",
                 rationale=(
-                    "The report states where the business stands without judging "
-                    "it against anything."
+                    "سيعرض التقرير الوضع الحالي من غير مقارنته بهدف."
+                    if ar else "The report states the measurements without judging them against a target."
                 ),
                 payload={"targets": False},
             ),
             alternatives=[],
             custom_prompt=(
-                "List your targets in plain words, for example: we aim for a 35% "
-                "margin and 20% growth."
+                ("اكتب أهدافك ببساطة؛ مثلًا: نستهدف هامش ربح 35% ونمو 20%." if business
+                 else "اكتب الهدف أو الحد المهم ببساطة؛ مثلًا: اعتبر القوة 6 فأكثر حدثًا شديدًا.")
+                if ar else
+                ("List your targets in plain words, for example: we aim for a 35% margin and 20% growth." if business
+                 else "Describe the target or threshold, for example: treat magnitude 6 or above as a severe event.")
             ),
-            skip_effect="The figures are reported without any target to compare against.",
+            skip_effect=("سيتم عرض المؤشرات من غير أهداف للمقارنة." if ar else "The figures are reported without any target to compare against."),
         )
         answer = yield decision
 

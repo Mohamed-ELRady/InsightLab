@@ -19,6 +19,7 @@ from pathlib import Path
 from .business_memory import BusinessMemory
 from .config import get_settings
 from .state import PipelineState
+from .project_memory import ProjectMemoryStore
 
 
 class RunWorkspace:
@@ -58,14 +59,15 @@ def save_run(state: PipelineState) -> RunWorkspace:
     """Write everything the run produced to disk and return the workspace."""
     workspace = RunWorkspace(state.run_id, state.workspace).prepare()
 
-    workspace.summary_path.write_text(
-        json.dumps(state.summary_dict(), indent=2, ensure_ascii=False, default=str),
-        encoding="utf-8",
-    )
-    workspace.memory_path.write_text(
-        json.dumps(state.memory.to_list(), indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    if state.project_id:
+        store = ProjectMemoryStore(state.workspace)
+        store.sync_memory(state.project_id, state.memory)
+        store.record_run(
+            state.run_id, state.project_id, state.source_name, state.started_at,
+            completed=state.is_complete,
+        )
+
+    save_run_summary(state, workspace)
 
     if state.frame is not None:
         state.frame.to_csv(workspace.cleaned_data_path, index=False)
@@ -76,6 +78,18 @@ def save_run(state: PipelineState) -> RunWorkspace:
             workspace.chart_path(chart.id).write_text(chart.figure_json, encoding="utf-8")
 
     return workspace
+
+
+def save_run_summary(state: PipelineState, workspace: RunWorkspace) -> None:
+    """Refresh lightweight audit files after the final stage has settled."""
+    workspace.summary_path.write_text(
+        json.dumps(state.summary_dict(), indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    workspace.memory_path.write_text(
+        json.dumps(state.memory.to_list(), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def load_business_memory(path: Path) -> BusinessMemory:

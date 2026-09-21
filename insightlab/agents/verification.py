@@ -229,8 +229,8 @@ class Verifier:
         parsed = self.reasoning.ask_json(
             "critic",
             CRITIC,
-            "These conclusions were drawn from a business owner's data and are "
-            "about to be put in front of them.\n\n"
+            "These conclusions were drawn from a user's dataset and are about "
+            "to be shown to them. Respect the detected data domain.\n\n"
             f"{listed}\n\n"
             f"Here is what the data actually contains:\n{context}\n\n"
             "For each one, try to knock it down. The objections that matter "
@@ -246,6 +246,7 @@ class Verifier:
                 '[{"number": 1, "objection": "one sentence saying what is wrong '
                 'with it", "severity": "fatal|serious|minor"}]'
             ),
+            max_output_tokens=900,
         )
 
         if not isinstance(parsed, list):

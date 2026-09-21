@@ -44,11 +44,36 @@ class ProviderSpec:
     requires_base_url: bool = False
 
 
+@dataclass(frozen=True)
+class ProviderRoute:
+    """One provider in the ordered failover chain, with rotating credentials."""
+
+    provider: str
+    model: str
+    api_keys: tuple[str, ...] = ()
+    base_url: str | None = None
+    chatgpt_connected: bool = False
+
+    @property
+    def label(self) -> str:
+        return PROVIDERS.get(self.provider, PROVIDERS["groq"]).label
+
+
 # Model IDs are provider-native. ``Settings.model_identifier`` adds the
 # LiteLLM routing prefix at the last possible moment. This matters for IDs such
 # as Groq's ``openai/gpt-oss-120b`` and OpenRouter's ``openrouter/free``: the
 # slash is part of the model ID, not evidence that it is already prefixed.
 PROVIDERS: dict[str, ProviderSpec] = {
+    "chatgpt": ProviderSpec(
+        key="chatgpt",
+        label="ChatGPT · via Codex (local)",
+        key_variable="",
+        litellm_prefix="codex",
+        default_model="auto",
+        models=(ModelOption("auto", "Account default"),),
+        access_note="Uses your plan's Codex allowance, not API billing. Local desktop use only.",
+        key_url="",
+    ),
     "groq": ProviderSpec(
         key="groq",
         label="Groq",
@@ -200,6 +225,12 @@ def _read_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _read_keys(name: str) -> tuple[str, ...]:
+    raw = os.getenv(name) or ""
+    values = raw.replace("\n", ",").split(",")
+    return tuple(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+
 @dataclass(frozen=True)
 class Settings:
     """Resolved application settings, safe to pass into a single run."""
@@ -208,8 +239,12 @@ class Settings:
     llm_model: str = "openai/gpt-oss-120b"
     llm_temperature: float = 0.2
     llm_timeout: int = 60
+    llm_max_output_tokens: int = 1400
     api_key: str | None = None
+    api_keys: tuple[str, ...] = ()
     llm_base_url: str | None = None
+    chatgpt_connected: bool = False
+    fallback_routes: tuple[ProviderRoute, ...] = ()
 
     workspace: Path = field(default_factory=lambda: PROJECT_ROOT / "data" / "runs")
     max_upload_mb: int = 200
@@ -233,13 +268,60 @@ class Settings:
         """Explain why the selected model cannot be called, if applicable."""
         if self.offline:
             return "offline mode is enabled"
-        if not self.llm_model.strip():
+        issues = [self._route_issue(route) for route in self.routes]
+        if any(issue is None for issue in issues):
+            return None
+        return issues[0] if issues else "no model provider is configured"
+
+    @staticmethod
+    def _route_issue(route: ProviderRoute) -> str | None:
+        spec = PROVIDERS.get(route.provider, PROVIDERS["groq"])
+        if route.provider == "chatgpt":
+            return None if route.chatgpt_connected else "sign in with ChatGPT first"
+        if not route.model.strip():
             return "a model ID is required"
-        if not self.api_key:
-            return f"{self.provider.key_variable} is not set"
-        if self.provider.requires_base_url and not self.llm_base_url:
+        if not route.api_keys:
+            return f"{spec.key_variable} is not set"
+        if spec.requires_base_url and not route.base_url:
             return "a base URL is required for this endpoint"
         return None
+
+    @property
+    def routes(self) -> tuple[ProviderRoute, ...]:
+        """Configured providers in exact failover order, primary first."""
+        primary_keys = tuple(dict.fromkeys(
+            key.strip() for key in ((self.api_key or ""), *self.api_keys) if key.strip()
+        ))
+        primary = ProviderRoute(
+            provider=self.llm_provider, model=self.llm_model,
+            api_keys=primary_keys, base_url=self.llm_base_url,
+            chatgpt_connected=self.chatgpt_connected,
+        )
+        return (primary, *self.fallback_routes)
+
+    def candidate_settings(self) -> tuple["Settings", ...]:
+        """Expand provider routes into one attempt per API key."""
+        if self.offline:
+            return ()
+        candidates: list[Settings] = []
+        for route in self.routes:
+            if self._route_issue(route) is not None:
+                continue
+            keys: tuple[str | None, ...] = (
+                (None,) if route.provider == "chatgpt" else tuple(route.api_keys)
+            )
+            for key in keys:
+                candidates.append(replace(
+                    self,
+                    llm_provider=route.provider,
+                    llm_model=route.model,
+                    api_key=key,
+                    api_keys=(),
+                    llm_base_url=route.base_url,
+                    chatgpt_connected=route.chatgpt_connected,
+                    fallback_routes=(),
+                ))
+        return tuple(candidates)
 
     @property
     def llm_available(self) -> bool:
@@ -252,7 +334,9 @@ class Settings:
             return "Offline mode · deterministic analysis"
         if issue := self.configuration_issue:
             return f"{self.provider.label} · {issue}"
-        return f"{self.provider.label} · {self.llm_model}"
+        fallback_count = max(0, len(self.candidate_settings()) - 1)
+        suffix = f" · {fallback_count} fallback(s)" if fallback_count else ""
+        return f"{self.provider.label} · {self.llm_model}{suffix}"
 
 
 @lru_cache(maxsize=1)
@@ -265,6 +349,9 @@ def get_settings() -> Settings:
     spec = PROVIDERS[provider]
     model = (os.getenv("LLM_MODEL") or "").strip() or spec.default_model
     api_key = (os.getenv(spec.key_variable) or "").strip() or None
+    api_keys = _read_keys("LLM_API_KEYS")
+    if api_key and api_key not in api_keys:
+        api_keys = (api_key, *api_keys)
     base_url = (os.getenv("LLM_BASE_URL") or "").strip() or None
 
     workspace_raw = (os.getenv("INSIGHTLAB_WORKSPACE") or "data/runs").strip()
@@ -277,7 +364,9 @@ def get_settings() -> Settings:
         llm_model=model,
         llm_temperature=_read_float("LLM_TEMPERATURE", 0.2),
         llm_timeout=_read_int("LLM_TIMEOUT", 60),
+        llm_max_output_tokens=max(256, _read_int("LLM_MAX_OUTPUT_TOKENS", 1400)),
         api_key=api_key,
+        api_keys=api_keys,
         llm_base_url=base_url,
         workspace=workspace,
         max_upload_mb=_read_int("MAX_UPLOAD_MB", 200),
@@ -292,17 +381,29 @@ def with_model_access(
     provider: str,
     model: str,
     api_key: str | None,
+    api_keys: tuple[str, ...] | list[str] | None = None,
     base_url: str | None = None,
+    chatgpt_connected: bool = False,
+    fallback_routes: tuple[ProviderRoute, ...] | list[ProviderRoute] | None = None,
 ) -> Settings:
     """Return a run-scoped copy populated from the GUI provider form."""
     if provider not in PROVIDERS:
         provider = base.llm_provider
+    cleaned_keys = tuple(dict.fromkeys(
+        value.strip() for value in (api_keys or ()) if value and value.strip()
+    ))
+    primary_key = None if provider == "chatgpt" else ((api_key or "").strip() or None)
+    if primary_key and primary_key not in cleaned_keys:
+        cleaned_keys = (primary_key, *cleaned_keys)
     return replace(
         base,
         llm_provider=provider,
         llm_model=model.strip(),
-        api_key=(api_key or "").strip() or None,
-        llm_base_url=(base_url or "").strip().rstrip("/") or None,
+        api_key=primary_key,
+        api_keys=() if provider == "chatgpt" else cleaned_keys,
+        llm_base_url=None if provider == "chatgpt" else ((base_url or "").strip().rstrip("/") or None),
+        chatgpt_connected=provider == "chatgpt" and chatgpt_connected,
+        fallback_routes=tuple(fallback_routes or ()),
     )
 
 

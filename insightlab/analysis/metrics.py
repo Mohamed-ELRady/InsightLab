@@ -14,7 +14,7 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
-from ..core.state import DatasetProfile, Kpi, Role
+from ..core.state import DatasetProfile, DatasetUnderstanding, Kpi, Role
 from .exploration import Columns, resolve_columns
 from .profiling import try_parse_datetime
 
@@ -400,20 +400,113 @@ DEFINITIONS: tuple[KpiDefinition, ...] = (
 )
 
 
-def available_kpis(frame: pd.DataFrame, profile: DatasetProfile) -> list[KpiDefinition]:
+def _contextual_definitions(
+    understanding: DatasetUnderstanding,
+) -> list[KpiDefinition]:
+    """Headline facts for observational/event data, never fake business KPIs."""
+    subject = "events" if understanding.subject == "earthquake events" else "records"
+    measure = understanding.primary_measure
+
+    def metric(kind: str, label: str, why: str) -> KpiDefinition:
+        def compute(columns: Columns, frame: pd.DataFrame) -> Kpi | None:
+            column = measure if measure in frame.columns else columns.primary_measure
+            if not column:
+                return None
+            values = _numeric(frame, column).dropna()
+            if values.empty:
+                return None
+            value = float(getattr(values, kind)())
+            word = {"mean": "average", "median": "median", "max": "maximum"}[kind]
+            return Kpi(
+                name=label,
+                value=value,
+                display_value=_money(value),
+                formula=f"{word.title()} of valid values in {column}",
+                interpretation=(
+                    f"This describes {column} across {len(values):,} usable observations. "
+                    "It is a measurement summary, not a financial total."
+                ),
+            )
+        return KpiDefinition(
+            f"context_{kind}_{measure}", label, why,
+            lambda columns, frame: bool(measure or columns.primary_measure), compute,
+        )
+
+    event_label = "Number of earthquake events" if understanding.subject == "earthquake events" else f"Number of {subject}"
+
+    def count_compute(columns: Columns, frame: pd.DataFrame) -> Kpi:
+        return Kpi(
+            name=event_label,
+            value=float(len(frame)),
+            display_value=_count(len(frame)),
+            formula="Count of rows after cleaning",
+            interpretation=f"The analysis is based on {len(frame):,} {subject} after cleaning.",
+        )
+
+    definitions = [KpiDefinition(
+        "context_record_count", event_label,
+        "the evidence base behind every later result", lambda columns, frame: True,
+        count_compute,
+    )]
+    if measure:
+        readable = "magnitude" if measure.casefold() == "mag" else measure.replace("_", " ")
+        definitions.extend([
+            metric("mean", f"Average {readable}", f"the central level of {readable}"),
+            metric("median", f"Median {readable}", f"the typical {readable} without extreme values dominating"),
+            metric("max", f"Maximum {readable}", f"the strongest or largest observed {readable}"),
+        ])
+
+    # A second domain-significant measure adds value without flooding the page.
+    if understanding.subject == "earthquake events":
+        def depth_compute(columns: Columns, frame: pd.DataFrame) -> Kpi | None:
+            if "depth" not in frame.columns:
+                return None
+            values = _numeric(frame, "depth").dropna()
+            if values.empty:
+                return None
+            value = float(values.max())
+            return Kpi(
+                name="Maximum recorded depth", value=value,
+                display_value=_money(value), formula="Maximum valid value in depth",
+                interpretation="The deepest recorded event in the file; read it alongside magnitude rather than as a total.",
+            )
+        definitions.append(KpiDefinition(
+            "context_max_depth", "Maximum recorded depth",
+            "the vertical extent of the recorded seismic activity",
+            lambda columns, frame: "depth" in frame.columns, depth_compute,
+        ))
+    return definitions
+
+
+def available_kpis(
+    frame: pd.DataFrame,
+    profile: DatasetProfile,
+    understanding: DatasetUnderstanding | None = None,
+) -> list[KpiDefinition]:
     """KPI definitions this dataset can actually support."""
-    columns = resolve_columns(frame, profile)
-    return [item for item in DEFINITIONS if item.supported(columns, frame)]
+    columns = resolve_columns(frame, profile, understanding)
+    definitions = (
+        _contextual_definitions(understanding)
+        if understanding and not understanding.is_business else list(DEFINITIONS)
+    )
+    return [item for item in definitions if item.supported(columns, frame)]
 
 
 def compute_kpis(
-    frame: pd.DataFrame, profile: DatasetProfile, chosen: list[str] | None = None
+    frame: pd.DataFrame,
+    profile: DatasetProfile,
+    chosen: list[str] | None = None,
+    understanding: DatasetUnderstanding | None = None,
 ) -> list[Kpi]:
     """Calculate the chosen KPIs, skipping any that turn out not to apply."""
-    columns = resolve_columns(frame, profile)
+    columns = resolve_columns(frame, profile, understanding)
+    definitions = (
+        _contextual_definitions(understanding)
+        if understanding and not understanding.is_business else list(DEFINITIONS)
+    )
     wanted = set(chosen) if chosen else None
     results: list[Kpi] = []
-    for definition in DEFINITIONS:
+    for definition in definitions:
         if wanted is not None and definition.id not in wanted:
             continue
         if not definition.supported(columns, frame):

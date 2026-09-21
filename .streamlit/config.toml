@@ -30,6 +30,7 @@ secondaryBackgroundColor = "#1f1f1e"
 borderColor = "#2c2c2a"
 
 [server]
+address = "127.0.0.1"
 maxUploadSize = 200
 
 [browser]

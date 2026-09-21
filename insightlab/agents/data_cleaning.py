@@ -15,7 +15,7 @@ from __future__ import annotations
 import pandas as pd
 
 from ..analysis import cleaning
-from ..analysis.profiling import profile_dataset
+from ..analysis.profiling import ensure_profile
 from ..core.decision import Option
 from ..core.reasoning import AgentPersona
 from ..core.state import PipelineState, Role
@@ -37,14 +37,14 @@ class DataCleaningAgent(Agent):
     persona = AgentPersona(
         role="Data quality consultant",
         goal=(
-            "Get the data into a state where the totals can be trusted, without "
-            "throwing away anything that turns out to be real business."
+            "Get the data into a state where its analysis can be trusted, without "
+            "throwing away any observation that is valid in its domain."
         ),
         backstory=(
-            "You have learned the hard way that the row an algorithm calls an "
-            "error is often the most important sale of the year. You never delete "
-            "anything on your own judgement when the owner is available to ask, "
-            "and you always say what a change would do to the totals before you "
+            "You have learned that the row an algorithm calls an error may be the "
+            "rare event that matters most. You never delete anything on your own "
+            "judgement when the user is available to ask, and you always say what "
+            "a change would do to the evidence before you "
             "make it."
         ),
     )
@@ -63,7 +63,7 @@ class DataCleaningAgent(Agent):
         yield from self._outliers_flow(state)
         yield from self._columns_flow(state)
 
-        state.profile = profile_dataset(state.frame)
+        ensure_profile(state)
         rows_after = len(state.frame)
         columns_after = state.frame.shape[1]
 
@@ -83,56 +83,63 @@ class DataCleaningAgent(Agent):
 
         share = report.total / len(state.frame) * 100
         preview = report.example.head(6).to_string(index=False, max_colwidth=16)
+        ar = state.language.code == "ar"
 
         decision = self.decide(
-            topic="Duplicate rows",
+            topic="الصفوف المكررة" if ar else "Duplicate rows",
             question=(
-                f"{report.total:,} rows are exact copies of another row. What "
-                "should we do with them?"
+                f"يوجد {report.total:,} صفًا مطابقًا تمامًا لصف آخر. ماذا نفعل بها؟"
+                if ar else
+                f"{report.total:,} rows are exact copies of another row. What should we do with them?"
             ),
             context=(
-                f"That is {share:.1f}% of your data, across {report.groups:,} "
+                (f"تمثل {share:.1f}% من البيانات ضمن {report.groups:,} مجموعات مكررة. "
+                 "غالبًا ينتج التكرار عن تصدير الملف مرتين أو دمج نظامين، وده قد يضاعف العدّ أو الإجماليات. "
+                 "لكن لو كل صف يمثل ملاحظة حقيقية يمكن أن تتكرر بنفس القيم، فالحذف هيقلل عدد المشاهدات بشكل غير صحيح.\n\n"
+                 f"نماذج من الصفوف:\n{preview}")
+                if ar else
+                (f"That is {share:.1f}% of your data, across {report.groups:,} "
                 "repeated groups. Duplicates usually come from a file being "
                 "exported twice or two systems being merged, and they inflate "
                 "every total by the amount they repeat.\n\n"
-                "But if your business genuinely records two identical "
-                "transactions - the same product, same price, same day - then "
-                "these are real and deleting them would understate your sales.\n\n"
-                f"Here are some of them:\n{preview}"
+                "But if each row is a real observation that can legitimately "
+                "repeat with identical values, deleting it would undercount the "
+                "observations.\n\n"
+                f"Here are some of them:\n{preview}")
             ),
             suggestion=Option(
-                label="Delete the copies and keep one of each",
+                label="احذف النسخ واحتفظ بصف واحد من كل مجموعة" if ar else "Delete the copies and keep one of each",
                 rationale=(
-                    f"Totals drop by the value of {report.total:,} rows and become "
-                    "correct if these came from a double export, which is the "
-                    "usual cause."
+                    (f"ستنخفض الإجماليات بقيمة {report.total:,} صفًا، وده الصحيح لو السبب تصدير مكرر.")
+                    if ar else
+                    (f"Totals drop by the value of {report.total:,} rows and become correct if these came from a double export, which is the usual cause.")
                 ),
                 payload={"action": "delete"},
             ),
             alternatives=[
                 Option(
-                    label="Keep every row as it is",
+                    label="احتفظ بكل الصفوف كما هي" if ar else "Keep every row as it is",
                     rationale=(
-                        "Choose this if two identical transactions really can "
-                        "happen in your business. Nothing changes."
+                        "اختار ده لو ملاحظتان متطابقتان ممكن تحصلان فعلًا في مجال البيانات."
+                        if ar else "Choose this if two identical observations can genuinely occur in this domain. Nothing changes."
                     ),
                     payload={"action": "keep"},
                 ),
+            ] + ([
                 Option(
-                    label="Merge them into one row and add the amounts up",
+                    label="ادمجها في صف واحد واجمع القيم" if ar else "Merge them into one row and add the amounts up",
                     rationale=(
-                        "The row count drops but the totals stay exactly the same. "
-                        "Use this when the repeats are real sales that were "
-                        "recorded as separate lines."
+                        "سيقل عدد الصفوف مع بقاء إجماليات المقاييس القابلة للجمع كما هي. لا تستخدمه مع القياسات العلمية غير القابلة للجمع."
+                        if ar else "The row count drops while additive totals stay the same. Do not use this for non-additive scientific measurements."
                     ),
                     payload={"action": "merge"},
                 ),
-            ],
+            ] if state.understanding.is_business else []),
             custom_prompt=(
-                "Tell us how duplicates should be treated in your business, for "
-                "example which columns make two rows genuinely the same."
+                "اشرح كيف يجب التعامل مع التكرار في مجال البيانات، مثل الأعمدة التي تحدد هوية الملاحظة فعلًا."
+                if ar else "Explain how duplicates should be treated in this domain, for example which columns define one observation's identity."
             ),
-            skip_effect="The duplicates stay in and every total includes them twice.",
+            skip_effect=("ستظل الصفوف المكررة وستدخل في الإجماليات أكثر من مرة." if ar else "The duplicates stay in and every total includes them twice."),
             evidence={"total": report.total, "groups": report.groups},
         )
         answer = yield decision
@@ -191,6 +198,7 @@ class DataCleaningAgent(Agent):
             yield from self._one_outlier_column(state, report)
 
     def _one_outlier_column(self, state: PipelineState, report) -> Flow:
+        ar = state.language.code == "ar"
         highs = ", ".join(f"{value:,.2f}" for value in report.high_values[:6])
         lows = ", ".join(f"{value:,.2f}" for value in report.low_values[:6])
         listed = []
@@ -201,66 +209,69 @@ class DataCleaningAgent(Agent):
         preview = report.rows.head(5).to_string(index=False, max_colwidth=16)
 
         decision = self.decide(
-            topic=f"Unusual values in {report.column}",
+            topic=(f"قيم غير معتادة في {report.column}" if ar else f"Unusual values in {report.column}"),
             question=(
-                f"{report.count:,} values in {report.column} are far outside the "
-                "normal range. Do you consider these normal for your business?"
+                (f"هناك {report.count:,} قيمة في {report.column} بعيدة جدًا عن النطاق المعتاد. هل تعتبرها طبيعية في هذا المجال؟")
+                if ar else
+                (f"{report.count:,} values in {report.column} are far outside the normal range. Are they plausible in this domain?")
             ),
             context=(
-                f"Most values in {report.column} sit between "
+                (f"معظم قيم {report.column} تقع بين {report.lower_bound:,.2f} و{report.upper_bound:,.2f}. "
+                 f"هناك {report.count:,} قيمة خارج النطاق ({report.share:.1%} من الصفوف). "
+                 "القرار يعتمد على طبيعة البيانات: قيمة مكتوبة بالخطأ ستشوّه المتوسطات، لكن حذف حدث نادر حقيقي قد يخفي أهم ما في الظاهرة.\n\n"
+                 f"نماذج من الصفوف:\n{preview}")
+                if ar else
+                (f"Most values in {report.column} sit between "
                 f"{report.lower_bound:,.2f} and {report.upper_bound:,.2f}. "
                 f"These {report.count:,} do not ({report.share:.1%} of the rows). "
                 + "; ".join(listed)
-                + ".\n\nThe answer depends entirely on your business, and it "
+                + ".\n\nThe answer depends on the dataset's domain, and it "
                 "matters: leaving a mistyped value in will drag every average "
-                "with it, while deleting a genuinely large sale hides your best "
-                "customer.\n\n"
-                f"Here are some of the rows involved:\n{preview}"
+                "with it, while deleting a genuine rare event may hide the most "
+                "important observation.\n\n"
+                f"Here are some of the rows involved:\n{preview}")
             ),
             suggestion=Option(
-                label="These are unusual but real - keep them and mark them",
+                label="القيم غير معتادة لكنها حقيقية — احتفظ بها وعلّمها" if ar else "These are unusual but real - keep them and mark them",
                 rationale=(
-                    "Nothing is lost and the rows are tagged so you can look at "
-                    "them separately. This is the safe answer when you are not "
-                    "sure."
+                    "لن نفقد أي بيانات، وسنعلّم الصفوف لمراجعتها منفصلة. ده الاختيار الآمن لو مش متأكد."
+                    if ar else "Nothing is lost and the rows are tagged so you can look at them separately. This is the safe answer when you are not sure."
                 ),
                 payload={"action": "flag"},
             ),
             alternatives=[
                 Option(
-                    label="These are data-entry errors - remove those rows",
+                    label="دي أخطاء إدخال — احذف الصفوف" if ar else "These are data-entry errors - remove those rows",
                     rationale=(
-                        f"{report.count:,} rows are removed. Choose this only if "
-                        "the values could not possibly be real, such as a price "
-                        "typed with an extra zero."
+                        (f"سيتم حذف {report.count:,} صفًا. اختار ده فقط لو القيم مستحيل تكون حقيقية.")
+                        if ar else (f"{report.count:,} rows are removed. Choose this only if the values could not possibly be real, such as a price typed with an extra zero.")
                     ),
                     payload={"action": "remove"},
                 ),
                 Option(
-                    label="These are naturally high-priced items - keep them as they are",
+                    label="دي قيم نادرة لكنها طبيعية — احتفظ بها كما هي" if ar else "These are rare but plausible - keep them as they are",
                     rationale=(
-                        "Nothing changes. Correct when you genuinely sell items at "
-                        "these prices, and the averages should reflect that."
+                        "لن يتغير شيء. مناسب لو القيم حقيقية ولازم التحليل يعكس الظاهرة كاملة."
+                        if ar else "Nothing changes. Correct when the observations are genuine and the analysis should preserve the full phenomenon."
                     ),
                     payload={"action": "keep"},
                 ),
                 Option(
-                    label="This is a seasonal or one-off effect - cap them at the normal range",
+                    label="تأثير موسمي أو استثنائي — حدّدها عند النطاق الطبيعي" if ar else "This is a seasonal or one-off effect - cap them at the normal range",
                     rationale=(
-                        "The rows stay, but the extreme numbers are pulled back to "
-                        "the edge of normal so they stop dominating every average. "
-                        "Your totals will drop slightly."
+                        "الصفوف ستظل موجودة، لكن القيم المتطرفة ستتوقف عند حد النطاق الطبيعي حتى لا تسيطر على المتوسطات."
+                        if ar else "The rows stay, but the extreme numbers are pulled back to the edge of normal so they stop dominating every average. Your totals will drop slightly."
                     ),
                     payload={"action": "cap"},
                 ),
             ],
             custom_prompt=(
-                "Tell us what these values are in your business - a bulk order, a "
-                "particular customer, a promotion - and what should happen to them."
+                "اشرح معنى القيم في مجال البيانات وإيه اللي نعمله فيها."
+                if ar else "Explain what these values mean in this domain and what should happen to them."
             ),
             skip_effect=(
-                f"The {report.count:,} unusual values stay exactly as they are and "
-                "will pull the averages with them."
+                (f"ستظل القيم غير المعتادة وعددها {report.count:,} كما هي وستؤثر على المتوسطات.")
+                if ar else (f"The {report.count:,} unusual values stay exactly as they are and will pull the averages with them.")
             ),
             evidence={
                 "column": report.column,
@@ -289,7 +300,7 @@ class DataCleaningAgent(Agent):
         if action == "keep":
             state.remember(
                 f"Very high values in {report.column} are normal for this "
-                "business and are not errors.",
+                "dataset's domain and are not errors.",
                 category="definition",
                 stage=self.stage,
                 topic=decision.topic,
@@ -319,8 +330,7 @@ class DataCleaningAgent(Agent):
     # -- columns -----------------------------------------------------------
 
     def _columns_flow(self, state: PipelineState) -> Flow:
-        profile = profile_dataset(state.frame)
-        state.profile = profile
+        profile = ensure_profile(state)
 
         needs_attention = []
         for column in profile.columns:
@@ -344,32 +354,37 @@ class DataCleaningAgent(Agent):
             yield from self._one_column(state, column, action, reason, payload)
 
     def _one_column(self, state: PipelineState, column, action, reason, payload) -> Flow:
+        ar = state.language.code == "ar"
         samples = ", ".join(str(value) for value in column.sample_values[:4])
-        alternatives = self._column_alternatives(column, action)
+        alternatives = self._column_alternatives(column, action, ar)
 
         decision = self.decide(
-            topic=f"The {column.name} column",
-            question=f"What should we do with the {column.name} column?",
+            topic=(f"عمود {column.name}" if ar else f"The {column.name} column"),
+            question=(f"ماذا نفعل بعمود {column.name}؟" if ar else f"What should we do with the {column.name} column?"),
             context=(
-                f"It holds {column.role.value} values such as {samples}. "
+                (f"يحتوي على قيم من نوع {column.role.value} مثل {samples}. "
+                 f"هناك {column.missing_count:,} صفوف فارغة من أصل {len(state.frame):,} ({column.missing_rate:.0%})، "
+                 f"وفيه {column.unique_count:,} قيمة مختلفة.")
+                if ar else
+                (f"It holds {column.role.value} values such as {samples}. "
                 f"{column.missing_count:,} of {len(state.frame):,} rows are empty "
                 f"({column.missing_rate:.0%}), and there are "
                 f"{column.unique_count:,} different values in it."
-                + (f" {column.note.capitalize()}." if column.note else "")
+                + (f" {column.note.capitalize()}." if column.note else ""))
             ),
             suggestion=Option(
-                label=self._action_label(action, column, payload),
-                rationale=reason.capitalize() + ".",
+                label=self._action_label(action, column, payload, ar),
+                rationale=("ده الإجراء الأنسب بناءً على نوع العمود ونسبة القيم الفارغة." if ar else reason.capitalize() + "."),
                 payload=payload,
             ),
             alternatives=alternatives,
             custom_prompt=(
-                f"Tell us what {column.name} means in your business and how it "
-                'should be handled. You can also say "rename to sales region", '
-                '"remove it", "keep it" or "fill blanks with 0".'
+                (f"اشرح معنى {column.name} في مجال البيانات وطريقة التعامل معه. يمكنك طلب تغيير الاسم أو الحذف أو الإبقاء أو ملء الفراغات بصفر.")
+                if ar else (f"Tell us what {column.name} means in this dataset and how it should be handled. You can also say \"rename it\", \"remove it\", \"keep it\" or \"fill blanks with 0\".")
             ),
             skip_effect=(
-                f"{column.name} is left exactly as it is, empty values included."
+                (f"سيظل {column.name} كما هو، بما في ذلك القيم الفارغة.")
+                if ar else (f"{column.name} is left exactly as it is, empty values included.")
             ),
             evidence={"column": column.to_dict()},
         )
@@ -437,27 +452,27 @@ class DataCleaningAgent(Agent):
         return None
 
     @staticmethod
-    def _action_label(action: str, column, payload: dict) -> str:
+    def _action_label(action: str, column, payload: dict, arabic: bool = False) -> str:
         if action == "drop":
-            return f"Remove the {column.name} column"
+            return f"احذف عمود {column.name}" if arabic else f"Remove the {column.name} column"
         if action == "fill":
             strategy = payload.get("strategy", "median")
             if strategy == "median":
-                return "Fill the empty values with the middle value"
-            return f'Group the empty values under "{strategy}"'
+                return "املأ القيم الفارغة بالقيمة الوسطى" if arabic else "Fill the empty values with the middle value"
+            return (f'اجمع القيم الفارغة تحت "{strategy}"' if arabic else f'Group the empty values under "{strategy}"')
         if action == "convert":
-            return f"Convert {column.name} to a {payload.get('target', 'number')}"
-        return f"Keep {column.name} as it is"
+            return (f"حوّل {column.name} إلى {payload.get('target', 'number')}" if arabic else f"Convert {column.name} to a {payload.get('target', 'number')}")
+        return f"احتفظ بـ{column.name} كما هو" if arabic else f"Keep {column.name} as it is"
 
     @staticmethod
-    def _column_alternatives(column, chosen: str) -> list[Option]:
+    def _column_alternatives(column, chosen: str, arabic: bool = False) -> list[Option]:
         options: list[Option] = []
 
         if chosen != "keep":
             options.append(
                 Option(
-                    label=f"Keep {column.name} exactly as it is",
-                    rationale="Nothing changes, empty values included.",
+                    label=(f"احتفظ بـ{column.name} كما هو" if arabic else f"Keep {column.name} exactly as it is"),
+                    rationale=("لن يتغير شيء، بما في ذلك القيم الفارغة." if arabic else "Nothing changes, empty values included."),
                     payload={"action": "keep"},
                 )
             )
@@ -465,10 +480,10 @@ class DataCleaningAgent(Agent):
         if chosen != "drop":
             options.append(
                 Option(
-                    label=f"Remove the {column.name} column",
+                    label=(f"احذف عمود {column.name}" if arabic else f"Remove the {column.name} column"),
                     rationale=(
-                        "Use this if the column is not something your business "
-                        "acts on. It disappears from every chart and report."
+                        "اختار ده لو العمود غير مفيد لسؤال التحليل؛ سيختفي من كل الرسومات والتقارير."
+                        if arabic else "Use this if the column is irrelevant to the analysis question. It disappears from every chart and report."
                     ),
                     payload={"action": "drop"},
                 )
@@ -477,10 +492,10 @@ class DataCleaningAgent(Agent):
         if column.missing_count:
             options.append(
                 Option(
-                    label=f"Remove the rows where {column.name} is empty",
+                    label=(f"احذف الصفوف التي يكون فيها {column.name} فارغًا" if arabic else f"Remove the rows where {column.name} is empty"),
                     rationale=(
-                        f"{column.missing_count:,} rows are removed entirely, "
-                        "including their values in every other column."
+                        (f"سيتم حذف {column.missing_count:,} صفًا بالكامل بكل قيمها.")
+                        if arabic else (f"{column.missing_count:,} rows are removed entirely, including their values in every other column.")
                     ),
                     payload={"action": "drop_missing"},
                 )
@@ -488,10 +503,10 @@ class DataCleaningAgent(Agent):
             if column.role is Role.MEASURE and chosen != "fill":
                 options.append(
                     Option(
-                        label="Fill the empty values with zero",
+                        label="املأ القيم الفارغة بصفر" if arabic else "Fill the empty values with zero",
                         rationale=(
-                            "Correct when an empty cell genuinely means nothing "
-                            "happened, rather than that nobody recorded it."
+                            "مناسب لما تكون الخانة الفارغة معناها إن مفيش شيء حدث، مش إن القيمة لم تُسجّل."
+                            if arabic else "Correct when an empty cell genuinely means nothing happened, rather than that nobody recorded it."
                         ),
                         payload={"action": "fill", "strategy": "zero"},
                     )
@@ -500,10 +515,10 @@ class DataCleaningAgent(Agent):
         if column.role is Role.TEXT:
             options.append(
                 Option(
-                    label=f"Treat {column.name} as a set of groups",
+                    label=(f"اعتبر {column.name} مجموعات" if arabic else f"Treat {column.name} as a set of groups"),
                     rationale=(
-                        "Makes it available for grouping and comparison in the "
-                        "charts, which free text cannot be used for."
+                        "سيصبح متاحًا للتجميع والمقارنة في الرسومات."
+                        if arabic else "Makes it available for grouping and comparison in the charts, which free text cannot be used for."
                     ),
                     payload={"action": "convert", "target": "category"},
                 )
@@ -514,10 +529,10 @@ class DataCleaningAgent(Agent):
         ):
             options.append(
                 Option(
-                    label=f"Read {column.name} as a date",
+                    label=(f"اقرأ {column.name} كتاريخ" if arabic else f"Read {column.name} as a date"),
                     rationale=(
-                        "Unlocks month, quarter and season comparisons that text "
-                        "dates cannot support."
+                        "يتيح المقارنة حسب الشهر والربع والموسم."
+                        if arabic else "Unlocks month, quarter and season comparisons that text dates cannot support."
                     ),
                     payload={"action": "convert", "target": "date"},
                 )

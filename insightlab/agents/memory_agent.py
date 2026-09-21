@@ -20,8 +20,9 @@ from __future__ import annotations
 import pandas as pd
 
 from ..analysis.features import apply_custom_rule
-from ..analysis.profiling import profile_dataset
+from ..analysis.profiling import ensure_profile
 from ..core.claims import Claim, Test, evaluate_claim, read_claim
+from ..core.business_memory import BusinessMemory
 from ..core.decision import Option
 from ..core.reasoning import AgentPersona
 from ..core.state import PipelineState
@@ -36,7 +37,7 @@ CLAIM_SHAPE = """{
   "column": "the column it is about, exactly as spelled in the list",
   "operator": ">|>=|<|<=|=|!=",
   "value": 5000,
-  "label": "what records meeting the rule are called, e.g. VIP",
+  "label": "what observations meeting the rule are called, e.g. severe",
   "period": "a month or quarter name, only for peak_period"
 }"""
 
@@ -47,16 +48,15 @@ class MemoryAgent(Agent):
     title = "Checking what we already know"
 
     persona = AgentPersona(
-        role="Account manager who remembers everything",
+        role="Project memory steward",
         goal=(
-            "Bring what the owner told you before to bear on the file in front "
+            "Bring what the user established before to bear on the file in front "
             "of you, and raise it when the two disagree."
         ),
         backstory=(
-            "You keep notes on every client and you read them before every "
-            "meeting. When the numbers disagree with what a client told you, you "
-            "raise it once, politely, and you assume they know something you do "
-            "not - because they usually do."
+            "You retain approved, versioned project notes and read them before "
+            "each analysis. You keep domains isolated. When the file disagrees "
+            "with a user-confirmed rule, you raise it once and preserve the audit trail."
         ),
     )
 
@@ -67,19 +67,34 @@ class MemoryAgent(Agent):
             state.skip_stage(self.stage, "There is no data to check against.")
             return
 
+        # Project facts are available from the first stage. Dataset-scoped
+        # facts join only after real column names are known, preventing a rule
+        # for one export from leaking into another dataset in the same project.
+        if state.project_id:
+            from ..core.project_memory import ProjectMemoryStore
+
+            stored = ProjectMemoryStore(state.workspace).load_memory(
+                state.project_id, columns=[str(name) for name in state.frame.columns]
+            )
+            stored_ids = {fact.id for fact in stored}
+            combined = [
+                *stored, *(fact for fact in state.memory if fact.id not in stored_ids)
+            ]
+            state.memory = BusinessMemory(
+                fact for fact in combined if self._relevant_to_domain(fact, state)
+            )
+
         if not state.memory:
             state.finish_stage(
                 self.stage,
-                "Nothing has been recorded about your business yet, so there was "
+                "Nothing has been recorded about this project yet, so there was "
                 "nothing to check.",
             )
             return
 
-        # This stage runs before the data is understood, so that what we
-        # already know can inform those questions rather than arrive too late
-        # to affect them. That means building the profile here if nobody has.
-        if not state.profile.columns:
-            state.profile = profile_dataset(state.frame)
+        # Understanding normally builds the profile first. Keep this fallback
+        # so the agent is still safe to run on its own in tests or integrations.
+        ensure_profile(state)
 
         self._extract_claims(state)
 
@@ -104,6 +119,44 @@ class MemoryAgent(Agent):
             if parts
             else "Nothing you have told us could be checked against this file.",
         )
+
+    @staticmethod
+    def _relevant_to_domain(fact, state: PipelineState) -> bool:
+        """Prevent facts from an unrelated dataset domain leaking into this run."""
+        family = state.understanding.domain_family
+        topic = str(getattr(fact, "source_topic", ""))
+        if topic.startswith("domain:"):
+            tagged = topic.split("|", 1)[0].removeprefix("domain:")
+            return tagged == family
+
+        columns = {str(name).casefold() for name in state.frame.columns}
+        claim = getattr(fact, "claim", None)
+        if claim is not None and getattr(claim, "column", ""):
+            return str(claim.column).casefold() in columns
+
+        text = fact.statement.casefold()
+        # Old automatically saved dataset summaries should follow their own
+        # source file, not every file placed in the same project.
+        if text.startswith("the dataset is "):
+            return state.source_name.casefold() in text
+
+        if family not in {"general", "business", "commerce", "finance"}:
+            business_terms = (
+                "revenue", "sales", "customer", "order_status", "invoice",
+                "business record", "مبيعات", "إيراد", "عميل", "طلب", "سجل عمل",
+            )
+            domain_terms = {
+                "earth_science": ("earthquake", "seismic", "زلزال"),
+                "weather": ("weather", "temperature", "طقس", "حرارة"),
+                "health": ("patient", "clinical", "health", "مريض", "صحي"),
+                "education": ("student", "education", "grade", "طالب", "تعليم"),
+                "technology": ("device", "system", "sensor", "جهاز", "نظام"),
+            }.get(family, ())
+            if any(term in text for term in business_terms) and not any(
+                term in text for term in domain_terms
+            ):
+                return False
+        return True
 
     # -- turning statements into claims ------------------------------------
 
@@ -135,22 +188,26 @@ class MemoryAgent(Agent):
 
     def _read(self, state: PipelineState, statement: str, columns: list[str]) -> Claim | None:
         """Read a claim out of a sentence, with the model or without it."""
+        deterministic = read_claim(statement, columns, state.frame)
+        if deterministic is not None and self._is_usable(deterministic, state):
+            return deterministic
         if self.reasoning.available:
             parsed = self.reason(
-                f'A business owner stated a rule about their business: "{statement}"\n\n'
+                f'A user stated a rule about their data or its domain: "{statement}"\n\n'
                 f"These are the columns in their data: {', '.join(columns)}."
                 "\n\nExpress the rule as something that can be tested against "
                 "the data. Use a column name exactly as spelled above. If the "
                 'statement is not a testable rule, set kind to "none" - a '
-                "description of their business is not a rule.",
+                "general description of the dataset is not a testable rule.",
                 shape=CLAIM_SHAPE,
+                max_output_tokens=450,
             )
             if isinstance(parsed, dict) and parsed.get("kind") not in (None, "none"):
                 claim = Claim.from_dict(parsed)
                 if claim and self._is_usable(claim, state):
                     return claim
 
-        return read_claim(statement, columns, state.frame)
+        return None
 
     @staticmethod
     def _is_usable(claim: Claim, state: PipelineState) -> bool:
@@ -183,55 +240,57 @@ class MemoryAgent(Agent):
 
     def _raise(self, state: PipelineState, fact, result: Test) -> Flow:
         """Ask the owner which of the two is right."""
+        ar = state.language.code == "ar"
         decision = self.decide(
-            topic="Something you told us does not match this file",
+            topic="معلومة سابقة لا تتفق مع الملف" if ar else "Something you told us does not match this file",
             question=(
-                f'You told us: "{fact.statement}" — but this file does not '
-                "agree. Which is right?"
+                (f'أخبرتنا سابقًا: "{fact.statement}"، لكن الملف الحالي لا يتفق معها. أيهما الصحيح؟')
+                if ar else (f'You told us: "{fact.statement}" — but this file does not agree. Which is right?')
             ),
             context=(
-                f"{result.detail}\n\n"
+                (f"{result.detail}\n\nقد تكون القاعدة تغيرت، أو الملف الحالي حالة استثنائية، أو القاعدة تخص جزءًا من النشاط غير موجود هنا. إنت تعرف السبب وإحنا شايفين الملف فقط.")
+                if ar else
+                (f"{result.detail}\n\n"
                 "There are three usual reasons for this. The rule has changed "
                 "and the note is out of date. Or the rule still holds and this "
                 "particular file is unusual - a short period, one branch, a bad "
-                "month. Or the rule was always about a part of the business this "
+                "period. Or the rule was always about a subset or context this "
                 "file does not cover.\n\n"
-                "You know which. We only see the file."
+                "You know which. We only see the file.")
             ),
             suggestion=Option(
-                label="This file is unusual — keep what I told you",
+                label="الملف الحالي استثنائي — احتفظ بالمعلومة السابقة" if ar else "This file is unusual — keep what I told you",
                 rationale=(
-                    "The note stays exactly as it is and keeps applying to future "
-                    "analyses. We will not raise it again for this file."
+                    "ستبقى المعلومة كما هي وتُطبق على التحليلات القادمة."
+                    if ar else "The note stays exactly as it is and keeps applying to future analyses. We will not raise it again for this file."
                 ),
                 payload={"action": "keep"},
             ),
             alternatives=[
                 Option(
-                    label=f"The file is right — update it to: {result.observed}",
+                    label=(f"الملف هو الصحيح — حدّث المعلومة إلى: {result.observed}" if ar else f"The file is right — update it to: {result.observed}"),
                     rationale=(
-                        "The note is replaced with what this file shows, and the "
-                        "new version is what future analyses will use."
+                        "سيتم استبدال المعلومة بما يظهره الملف واستخدام النسخة الجديدة لاحقًا."
+                        if ar else "The note is replaced with what this file shows, and the new version is what future analyses will use."
                     ),
                     payload={"action": "update", "observed": result.observed},
                 ),
                 Option(
-                    label="Forget that note entirely",
+                    label="احذف المعلومة نهائيًا" if ar else "Forget that note entirely",
                     rationale=(
-                        "It stops applying to this and every future analysis. Use "
-                        "this when the rule no longer exists rather than having "
-                        "changed."
+                        "لن تُطبق على هذا التحليل أو أي تحليل قادم."
+                        if ar else "It stops applying to this and every future analysis. Use this when the rule no longer exists rather than having changed."
                     ),
                     payload={"action": "forget"},
                 ),
             ],
             custom_prompt=(
-                "Explain what is going on — for example: that rule only applies "
-                "to the retail side, or we changed the threshold last year."
+                "اشرح السبب؛ مثلًا: القاعدة تخص قطاع التجزئة فقط، أو تم تغيير الحد العام الماضي."
+                if ar else "Explain what is going on — for example: that rule only applies to the retail side, or we changed the threshold last year."
             ),
             skip_effect=(
-                "The note stays as it is and the disagreement is recorded in the "
-                "run log without being resolved."
+                "ستبقى المعلومة كما هي وسيتم تسجيل التعارض من غير حسم."
+                if ar else "The note stays as it is and the disagreement is recorded in the run log without being resolved."
             ),
             evidence={
                 "statement": fact.statement,
@@ -284,7 +343,7 @@ class MemoryAgent(Agent):
         if claim.kind == "exclusion":
             return (
                 f"Records where {claim.column.replace('_', ' ')} is {claim.value} "
-                "are part of the business and are counted."
+                "are valid observations and are counted."
             )
         return f"{fact.statement} (updated: {result.detail})"
 
@@ -348,7 +407,7 @@ class MemoryAgent(Agent):
             applied += 1
 
         if applied:
-            state.profile = profile_dataset(state.frame)
+            ensure_profile(state)
         return applied
 
 

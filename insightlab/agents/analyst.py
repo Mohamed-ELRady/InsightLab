@@ -157,7 +157,7 @@ class AnalystAgent:
         parsed = self.reasoning.ask_json(
             self.key,
             self.persona,
-            f'A business owner asked: "{question}"\n\n'
+            f'A user working with {state.understanding.business_domain} data asked: "{question}"\n\n'
             f"{self._schema_block(state)}"
             f"{self._memory_block(state)}\n\n"
             "Express their question as a calculation over these columns. Use "
@@ -166,6 +166,7 @@ class AnalystAgent:
             "false and say what is missing - do not substitute a different "
             "column that happens to exist.",
             shape=PLAN_SHAPE,
+            max_output_tokens=600,
         )
         if isinstance(parsed, dict):
             return parsed
@@ -254,7 +255,8 @@ class AnalystAgent:
             "restate the question. Do not describe the table. If the answer "
             "carries an obvious caveat about how few records it rests on, say "
             "so in the same breath.",
-            expected="One or two sentences of plain business English.",
+            expected="One or two plain sentences using the dataset's actual domain vocabulary.",
+            max_output_tokens=220,
         )
         if not text:
             return result.headline
@@ -309,17 +311,18 @@ class AnalystAgent:
         parsed = self.reasoning.ask_json(
             self.key,
             self.persona,
-            "A business owner has just been shown an analysis of their data.\n\n"
+            f"A user has just been shown an analysis of {state.understanding.business_domain} data.\n\n"
             f"{self._schema_block(state)}"
             f"{self._memory_block(state)}\n\n"
             f"Suggest {SUGGESTION_COUNT + 2} follow-up questions they would "
-            "realistically ask about their own business, and the calculation "
-            "each one becomes. Questions must be about what they should do, not "
-            "about the data itself. Use only the column names listed.",
+            "realistically ask in this domain, and the calculation each one "
+            "becomes. Never introduce commercial language unless this is a "
+            "commercial dataset. Use only the column names listed.",
             shape=(
                 '[{"question": "Which region grew fastest this year?", '
                 f'"plan": {PLAN_SHAPE}}}]'
             ),
+            max_output_tokens=1000,
         )
         if not isinstance(parsed, list):
             return []
@@ -340,34 +343,69 @@ class AnalystAgent:
         """Suggestions built from the columns present, with no model."""
         from ..analysis.exploration import resolve_columns
 
-        columns = resolve_columns(state.frame, state.profile)
+        columns = resolve_columns(state.frame, state.profile, state.understanding)
         measure = columns.primary_measure
         if not measure:
             return []
 
         readable = measure.replace("_", " ")
         pairs: list[tuple[str, dict[str, Any]]] = []
+        ar = state.language.code == "ar"
+        business = state.understanding.is_business
+        aggregation = state.understanding.aggregation_for(
+            measure, "sum" if business else "mean"
+        )
 
         if columns.primary_date:
+            if not business and state.understanding.subject == "earthquake events":
+                question = (
+                    "كيف تغيّر عدد الأحداث الزلزالية شهرًا بعد شهر؟"
+                    if ar else "How did earthquake frequency change month by month?"
+                )
+                plan = {"measure": "", "aggregation": "count", "time_grain": "month"}
+            else:
+                question = (
+                    f"كيف تغيّر {readable} شهرًا بعد شهر؟"
+                    if ar else f"How has {readable} moved month by month?"
+                )
+                plan = {
+                    "measure": measure,
+                    "aggregation": aggregation,
+                    "time_grain": "month",
+                }
+            pairs.append((question, plan))
+
+        categories = list(columns.categories)
+        preferred = state.understanding.primary_category
+        if preferred in categories:
+            categories.remove(preferred)
+            categories.insert(0, preferred)
+        for category in categories[:3]:
+            readable_category = category.replace("_", " ")
             pairs.append(
                 (
-                    f"How has {readable} moved month by month?",
-                    {"measure": measure, "aggregation": "sum", "time_grain": "month"},
+                    (
+                        f"ما متوسط {readable} حسب {readable_category}؟"
+                        if ar and not business else
+                        f"What is the average {readable} by {readable_category}?"
+                        if not business else
+                        f"Which {readable_category} brings in the most {readable}?"
+                    ),
+                    {
+                        "measure": measure,
+                        "aggregation": aggregation,
+                        "group_by": [category],
+                    },
                 )
             )
-        for category in columns.categories[:3]:
-            pairs.append(
-                (
-                    f"Which {category.replace('_', ' ')} brings in the most {readable}?",
-                    {"measure": measure, "aggregation": "sum", "group_by": [category]},
-                )
-            )
-            pairs.append(
-                (
-                    f"What is the average {readable} per {category.replace('_', ' ')}?",
-                    {"measure": measure, "aggregation": "mean", "group_by": [category]},
-                )
-            )
+            if not business:
+                pairs.append((
+                    (
+                        f"كم عدد السجلات في كل {readable_category}؟"
+                        if ar else f"How many observations are in each {readable_category}?"
+                    ),
+                    {"measure": "", "aggregation": "count", "group_by": [category]},
+                ))
         customer = columns.entity_named("customer", "client", "account")
         if customer:
             pairs.append(
@@ -411,9 +449,13 @@ class AnalystAgent:
     @staticmethod
     def _memory_block(state: PipelineState) -> str:
         block = state.memory.as_prompt_block()
-        if not block:
+        directive = getattr(state, "analysis_directive", "").strip()
+        if not block and not directive:
             return ""
-        return (
-            "\n\nThe owner has told you the following about their business. "
+        text = (
+            "\n\nThe user has established the following project and domain facts. "
             f"Treat these as true:\n{block}"
-        )
+        ) if block else ""
+        if directive:
+            text += f"\n\nThe user's explicit goal for this run is:\n- {directive}"
+        return text

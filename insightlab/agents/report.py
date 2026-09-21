@@ -2,7 +2,7 @@
 
 The deliverables are what the owner is left holding after the conversation ends,
 so this stage writes the documents, saves the cleaned data next to them, and
-persists the business memory in a form a later run can pick up.
+persists project memory in a form a later run can pick up.
 
 A failure in one format never costs the others: if PowerPoint export breaks, the
 PDF is still written and the failure is reported rather than swallowed.
@@ -10,12 +10,13 @@ PDF is still written and the failure is reported rather than swallowed.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from ..core.decision import Option
 from ..core.reasoning import AgentPersona
 from ..core.state import PipelineState
-from ..core.storage import save_run
+from ..core.storage import save_run, save_run_summary
 from ..reports import build_content, write_docx, write_pdf, write_pptx
 from .base import Agent, Flow
 
@@ -35,7 +36,7 @@ class ReportAgent(Agent):
     persona = AgentPersona(
         role="Report writer",
         goal=(
-            "Leave the owner with something they can read on their own, act on, "
+            "Leave the user with something they can read on their own, use, "
             "and hand to someone else without having to explain it first."
         ),
         backstory=(
@@ -61,7 +62,10 @@ class ReportAgent(Agent):
         else:
             chosen = list(answer.payload.get("formats", []))
 
+        state.report_progress(self.stage, 0.08, "progress.report.save")
         workspace = save_run(state)
+        # Keep the historical key for saved-run and API compatibility; the UI
+        # localises it to "Project memory"/"ذاكرة المشروع".
         state.add_artefact("Business memory", workspace.memory_path, stage=self.stage)
         state.add_artefact("Run summary", workspace.summary_path, stage=self.stage)
 
@@ -71,6 +75,7 @@ class ReportAgent(Agent):
                 "Saved the cleaned data and the run log. No documents were "
                 "generated.",
             )
+            save_run_summary(state, workspace)
             return
 
         if state.language.rtl:
@@ -100,19 +105,38 @@ class ReportAgent(Agent):
             )
 
         stem = self._filename_stem(state)
-        produced = 0
+        jobs = []
         for key in chosen:
             if key not in FORMATS:
                 continue
             label, extension, renderer = FORMATS[key]
             target = workspace.report_path(f"{stem}.{extension}")
-            try:
-                renderer(state, target, content)
-            except Exception as error:  # noqa: BLE001 - one format must not lose the rest
-                self.warn(state, f"The {label} could not be written: {error}")
-                continue
-            state.add_artefact(label, target, stage=self.stage)
-            produced += 1
+            jobs.append((label, target, renderer))
+
+        produced = 0
+        state.report_progress(self.stage, 0.66, "progress.report.documents")
+        # PDF, PowerPoint and Word read the same immutable content and write
+        # separate files.  Producing them concurrently shortens the common
+        # PDF+PowerPoint path without changing either document.
+        with ThreadPoolExecutor(max_workers=min(3, max(1, len(jobs)))) as pool:
+            futures = {
+                pool.submit(renderer, state, target, content): (label, target)
+                for label, target, renderer in jobs
+            }
+            for index, future in enumerate(as_completed(futures)):
+                label, target = futures[future]
+                try:
+                    future.result()
+                except Exception as error:  # noqa: BLE001 - one format must not lose the rest
+                    self.warn(state, f"The {label} could not be written: {error}")
+                else:
+                    state.add_artefact(label, target, stage=self.stage)
+                    produced += 1
+                state.report_progress(
+                    self.stage,
+                    0.66 + (0.28 * (index + 1) / max(len(jobs), 1)),
+                    "progress.report.documents",
+                )
 
         if produced:
             state.finish_stage(
@@ -126,50 +150,58 @@ class ReportAgent(Agent):
                 "No document could be written. The cleaned data and the run log "
                 "were still saved.",
             )
+        # ``save_run`` happens near the start so renderers can use the workspace.
+        # Refresh the audit snapshot after this stage reaches done/failed;
+        # otherwise summary.json permanently says the report is still running.
+        save_run_summary(state, workspace)
 
     # -- decision ----------------------------------------------------------
 
     def _format_decision(self, state: PipelineState):
+        ar = state.language.code == "ar"
         return self.decide(
-            topic="What to produce",
-            question="Which documents would you like?",
+            topic="ملفات التقرير" if ar else "What to produce",
+            question="أي ملفات تريد إنشاءها؟" if ar else "Which documents would you like?",
             context=(
-                "Whatever you choose, you also get the cleaned copy of your data, "
+                ("أيًا كان اختيارك، ستحصل أيضًا على نسخة البيانات المنظّفة وسجل كامل بكل التعديلات والمعلومات المحفوظة عن مشروعك وبياناتك.\n\n"
+                 "ملف PDF للقراءة والحفظ، وPowerPoint للعرض، وWord للتعديل قبل الإرسال.")
+                if ar else
+                ("Whatever you choose, you also get the cleaned copy of your data, "
                 "the full log of every change made to it, and everything you told "
-                "us about your business saved for next time.\n\n"
+                "us about this project and its data saved for next time.\n\n"
                 "The PDF is the one to read and file. The PowerPoint is the one "
                 "to present. The Word version is the one to edit before sending "
-                "it on."
+                "it on.")
             ),
             suggestion=Option(
-                label="PDF and PowerPoint",
+                label="PDF وPowerPoint" if ar else "PDF and PowerPoint",
                 rationale=(
-                    "One document to read and file, one to present. This covers "
-                    "what most people need."
+                    "ملف للقراءة والحفظ وملف للعرض، وده يغطي الاستخدام الأكثر شيوعًا."
+                    if ar else "One document to read and file, one to present. This covers what most people need."
                 ),
                 payload={"formats": ["pdf", "pptx"]},
             ),
             alternatives=[
                 Option(
-                    label="All three formats",
-                    rationale="PDF, PowerPoint and Word.",
+                    label="الصيغ الثلاث كلها" if ar else "All three formats",
+                    rationale="PDF وPowerPoint وWord." if ar else "PDF, PowerPoint and Word.",
                     payload={"formats": ["pdf", "pptx", "docx"]},
                 ),
                 Option(
-                    label="PDF only",
-                    rationale="The quickest option, and the one that prints correctly.",
+                    label="PDF فقط" if ar else "PDF only",
+                    rationale="الخيار الأسرع والأنسب للطباعة." if ar else "The quickest option, and the one that prints correctly.",
                     payload={"formats": ["pdf"]},
                 ),
                 Option(
-                    label="Word only",
-                    rationale="Choose this if you intend to edit the report before sending it.",
+                    label="Word فقط" if ar else "Word only",
+                    rationale="اختاره لو تريد تعديل التقرير قبل إرساله." if ar else "Choose this if you intend to edit the report before sending it.",
                     payload={"formats": ["docx"]},
                 ),
             ],
-            custom_prompt="Name the formats you want, for example: pdf and word.",
+            custom_prompt=("اكتب الصيغ المطلوبة، مثل: PDF وWord." if ar else "Name the formats you want, for example: pdf and word."),
             skip_effect=(
-                "No documents are written. The cleaned data and the run log are "
-                "still saved."
+                "لن يتم إنشاء تقارير، لكن ستظل البيانات المنظّفة وسجل التشغيل محفوظين."
+                if ar else "No documents are written. The cleaned data and the run log are still saved."
             ),
         )
 

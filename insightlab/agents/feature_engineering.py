@@ -11,7 +11,7 @@ does this business already use internally?
 from __future__ import annotations
 
 from ..analysis.features import apply_custom_rule, suggest_features
-from ..analysis.profiling import profile_dataset
+from ..analysis.profiling import ensure_profile
 from ..core.decision import Option
 from ..core.reasoning import AgentPersona
 from ..core.state import PipelineState, Role
@@ -24,16 +24,15 @@ class FeatureEngineeringAgent(Agent):
     title = "Building new measures"
 
     persona = AgentPersona(
-        role="Business analyst",
+        role="Domain-aware feature analyst",
         goal=(
-            "Turn the raw columns into the measures the owner actually thinks in, "
-            "and capture the classifications their business already uses."
+            "Turn raw columns into valid derived measures for the detected domain, "
+            "and capture the classifications its users actually rely on."
         ),
         backstory=(
-            "You know that every business has its own vocabulary - a VIP tier, an "
-            "A/B/C product grade, a peak season - and that an analysis using "
-            "generic groupings instead of theirs gets politely ignored. So you "
-            "always ask."
+            "You know every field has its own vocabulary, thresholds and accepted "
+            "groupings. You never invent a scientific cut-off from the sample and "
+            "you never force commercial concepts onto unrelated data."
         ),
     )
 
@@ -56,7 +55,7 @@ class FeatureEngineeringAgent(Agent):
 
         yield from self._ask_internal_classifications(state)
 
-        state.profile = profile_dataset(state.frame)
+        ensure_profile(state)
         if state.engineered_columns:
             state.finish_stage(
                 self.stage,
@@ -69,6 +68,8 @@ class FeatureEngineeringAgent(Agent):
     # -- standard features -------------------------------------------------
 
     def _offer_features(self, state: PipelineState, suggestions) -> Flow:
+        ar = state.language.code == "ar"
+        business = state.understanding.is_business
         listing = "\n".join(
             f"- {item.name}: {item.reason}" for item in suggestions
         )
@@ -76,52 +77,57 @@ class FeatureEngineeringAgent(Agent):
         core_names = ", ".join(item.name for item in core) or suggestions[0].name
 
         decision = self.decide(
-            topic="New measures to add",
+            topic="مقاييس جديدة نقدر نضيفها" if ar else "New measures to add",
             question=(
-                f"We can build {len(suggestions)} new measures from the columns "
-                "you already have. Which should we add?"
+                (f"نقدر ننشئ {len(suggestions)} مقاييس جديدة من الأعمدة الموجودة. أيها تريد إضافته؟")
+                if ar else (f"We can build {len(suggestions)} new measures from the columns you already have. Which should we add?")
             ),
             context=(
-                "None of these need extra data - they are all worked out from "
+                ("كل المقاييس محسوبة من أعمدة ملفك ولا تحتاج إلى بيانات إضافية، ولن تغيّر الأعمدة الأصلية:\n\n" + listing)
+                if ar else
+                ("None of these need extra data - they are all worked out from "
                 "columns already in your file. Each one exists to answer a "
                 "question the raw columns cannot:\n\n"
                 f"{listing}\n\n"
                 "Adding a measure costs nothing and never changes your original "
-                "columns."
+                "columns.")
             ),
             suggestion=Option(
-                label=f"Add all {len(suggestions)}",
+                label=(f"أضف المقاييس كلها ({len(suggestions)})" if ar else f"Add all {len(suggestions)}"),
                 rationale=(
-                    "Each one unlocks a question the raw columns cannot answer, "
-                    "and unused ones simply do not appear in the charts."
+                    "كل مقياس يتيح سؤالًا جديدًا، والمقاييس غير المفيدة لن تظهر في الرسومات."
+                    if ar else "Each one unlocks a question the raw columns cannot answer, and unused ones simply do not appear in the charts."
                 ),
                 payload={"ids": [item.id for item in suggestions]},
             ),
             alternatives=[
                 Option(
-                    label=f"Add only the essentials ({core_names})",
+                    label=(f"أضف المقاييس الأساسية فقط ({core_names})" if ar else f"Add only the essentials ({core_names})"),
                     rationale=(
-                        "The smallest set that still allows time and profit "
-                        "comparisons. Keeps the data close to what you recognise."
+                        ("أصغر مجموعة تتيح مقارنات الوقت والأرباح وتحافظ على بساطة البيانات." if business
+                         else "أصغر مجموعة تتيح المقارنات الأساسية وتحافظ على بساطة البيانات.")
+                        if ar else
+                        ("The smallest set that still allows time and profit comparisons. Keeps the data close to what you recognise." if business
+                         else "The smallest set that enables the core comparisons while keeping the data close to its source form.")
                     ),
                     payload={"ids": [item.id for item in core] or [suggestions[0].id]},
                 ),
             ]
             + [
                 Option(
-                    label=f"Add only {item.name}",
-                    rationale=item.question,
+                    label=(f"أضف {item.name} فقط" if ar else f"Add only {item.name}"),
+                    rationale=("إضافة هذا المقياس فقط." if ar else item.question),
                     payload={"ids": [item.id]},
                 )
                 for item in suggestions[:3]
             ],
             custom_prompt=(
-                "Describe a measure your business uses that is not listed, and "
-                "which columns it comes from."
+                "اكتب مقياسًا مهمًا في مجال البيانات وغير موجود في القائمة، وحدد الأعمدة التي يعتمد عليها."
+                if ar else "Describe a domain-specific measure that is not listed, and which columns it comes from."
             ),
             skip_effect=(
-                "No new measures are added. Time-based and profit comparisons "
-                "will not be available later."
+                "لن نضيف مقاييس مشتقة جديدة، وقد لا تتوفر بعض المقارنات لاحقًا."
+                if ar else "No derived measures are added, so some later comparisons may be unavailable."
             ),
             evidence={"suggestions": [item.id for item in suggestions]},
         )
@@ -136,7 +142,7 @@ class FeatureEngineeringAgent(Agent):
             wanted = {item.id for item in suggestions}
             self.note(
                 state,
-                "Your description was saved to the business memory, and the "
+                "Your description was saved to project memory, and the "
                 "standard measures were added so the analysis still has "
                 "something to work with.",
             )
@@ -188,43 +194,59 @@ class FeatureEngineeringAgent(Agent):
             else 'For example: "orders over 5,000 are large accounts".'
         )
 
+        ar = state.language.code == "ar"
+        business = state.understanding.is_business
+        if not business:
+            classification_context = (
+                "بعض المجالات تستخدم حدودًا أو فئات معروفة علميًا أو تشغيليًا. لن نخترع حدًا من البيانات؛ إذا كان عندك تعريف معتمد اكتبه وسنطبقه مع الاحتفاظ بالقيم الأصلية."
+                if ar else
+                "Some domains use established scientific or operational thresholds. We will not invent one from the data; if you have an accepted definition, provide it and we will apply it while preserving the source values."
+            )
+        else:
+            classification_context = (
+                ("كثير من الأنشطة تصنّف العملاء أو المنتجات أو الطلبات بطريقتها، مثل VIP أو درجات A/B/C. "
+                 "لو لم نعرف نظامك سنستخدم تصنيفات عامة.\n\n" +
+                 ((f"مثال: العملاء الذين يتجاوز إنفاقهم 5,000 إجمالًا هم VIP، اعتمادًا على عمود {example_measure}." if example_measure else "مثال: الطلبات التي تتجاوز 5,000 تُصنف كطلبات كبيرة.")))
+                if ar else
+                ("Most businesses group their customers, products or orders in a way that is specific to them.\n\n" + example)
+            )
         decision = self.decide(
-            topic="Your own classifications",
+            topic="تصنيفات المجال الخاصة" if ar and not business else "تصنيفات نشاطك الخاصة" if ar else "Domain classifications" if not business else "Your own classifications",
             question=(
-                "Does your company use any classifications of its own that we "
-                "should build into the analysis?"
+                "هل يستخدم هذا المجال حدودًا أو تصنيفات معروفة نضيفها للتحليل؟"
+                if ar and not business else "هل يستخدم نشاطك تصنيفات خاصة نضيفها للتحليل؟"
+                if ar else "Does this domain use established thresholds or classifications we should add?"
+                if not business else "Does your company use any classifications of its own that we should build into the analysis?"
             ),
-            context=(
-                "Most businesses group their customers, products or orders in a "
-                "way that is specific to them - a VIP tier, an A/B/C grade, a "
-                "definition of a large account. If we do not know yours, the "
-                "analysis will use generic groupings, which is usually the reason "
-                "a report gets read once and never again.\n\n" + example
-            ),
+            context=classification_context,
             suggestion=Option(
-                label="We do not use any special classifications",
+                label="لا نستخدم تصنيفات خاصة" if ar else "We do not use any special classifications",
                 rationale=(
-                    "The analysis uses standard groupings based on size and "
-                    "frequency, which works well when there is no internal system."
+                    "سيستخدم التحليل تصنيفات قياسية حسب الحجم والتكرار."
+                    if ar else "The analysis uses standard groupings based on size and frequency, which works well when there is no internal system."
                 ),
                 payload={"rule": None},
             ),
-            alternatives=[
+            alternatives=([
                 Option(
-                    label="Use standard size bands (small, medium, large, very large)",
+                    label="استخدم شرائح الحجم القياسية (صغير، متوسط، كبير، كبير جدًا)" if ar else "Use standard size bands (small, medium, large, very large)",
                     rationale=(
-                        "Splits records into four equal-sized groups by value. A "
-                        "reasonable default when there is no internal rule."
+                        "يقسم السجلات إلى أربع مجموعات متساوية حسب القيمة."
+                        if ar else "Splits records into four equal-sized groups by value. A reasonable default when there is no internal rule."
                     ),
                     payload={"rule": "quartiles"},
                 ),
-            ],
+            ] if business else []),
             custom_prompt=(
-                "Describe your classification in plain words, including the "
-                "column it is based on and the cut-off, for example: customers "
-                "spending over 5,000 in total are VIP."
+                "اشرح التصنيف وحدد العمود والحد الفاصل؛ مثال: الأحداث التي تتجاوز قيمة معينة تُصنف كأحداث قوية."
+                if ar and not business else
+                "اشرح التصنيف وحدد العمود والحد الفاصل؛ مثلًا: العملاء الذين يتجاوز إنفاقهم 5,000 هم VIP."
+                if ar else
+                "Describe the classification, its column and threshold; for example, observations above a field-specific limit are classified as high."
+                if not business else
+                "Describe your classification in plain words, including the column it is based on and the cut-off, for example: customers spending over 5,000 in total are VIP."
             ),
-            skip_effect="Only generic groupings are used in the analysis.",
+            skip_effect=("سيستخدم التحليل التصنيفات العامة فقط." if ar else "Only generic groupings are used in the analysis."),
         )
         answer = yield decision
 
@@ -239,7 +261,7 @@ class FeatureEngineeringAgent(Agent):
         if rule is None:
             self.note(
                 state,
-                "Your classification was saved to the business memory and every "
+                "Your classification was saved to project memory and every "
                 "later stage will take it into account, but we could not work out "
                 "an exact cut-off from it, so no new column was created.",
             )
@@ -265,7 +287,7 @@ class FeatureEngineeringAgent(Agent):
             return None
 
         parsed = self.reason(
-            f'A business owner described one of their internal classifications: "{text}"\n\n'
+            f'A user described a classification used in this data domain: "{text}"\n\n'
             f"These numeric columns are available: {', '.join(available)}."
             f"{self.memory_block(state)}\n\n"
             "Work out which column the rule is about and where the cut-offs fall. "
@@ -277,6 +299,7 @@ class FeatureEngineeringAgent(Agent):
                 '{"column": "name of the new column", "source": "existing numeric column", '
                 '"bands": [{"upto": 5000, "label": "Regular"}], "otherwise": "VIP"}'
             ),
+            max_output_tokens=500,
         )
 
         if not isinstance(parsed, dict):

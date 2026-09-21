@@ -10,12 +10,17 @@ from __future__ import annotations
 
 from ..core.decision import Option
 from ..core.reasoning import AgentPersona
+from ..core.language import axis_label
 from ..core.state import Dashboard, DashboardPanel, PipelineState
 from ..analysis.exploration import AXES
 from .base import Agent, Flow
 
 #: What each audience opens a dashboard to find out.
 AUDIENCES: dict[str, tuple[str, str]] = {
+    "analyst": ("Data analyst", "the main pattern, evidence and caveats in one view"),
+    "researcher": ("Researcher", "distributions, relationships and unusual observations"),
+    "decision_maker": ("Decision maker", "the headline findings and what requires attention"),
+    "technical": ("Technical team", "data quality, detailed measurements and exceptions"),
     "ceo": (
         "Chief executive",
         "the direction of the whole business in under a minute",
@@ -40,6 +45,7 @@ AUDIENCES: dict[str, tuple[str, str]] = {
 
 #: The KPIs each audience cares about, most important first.
 AUDIENCE_KPIS: dict[str, tuple[str, ...]] = {
+    "analyst": (), "researcher": (), "decision_maker": (), "technical": (),
     "ceo": ("Total revenue", "Total profit", "Profit margin", "Growth rate"),
     "sales": (
         "Total revenue",
@@ -59,6 +65,10 @@ AUDIENCE_KPIS: dict[str, tuple[str, ...]] = {
 
 #: The business areas each audience's charts are drawn from.
 AUDIENCE_AXES: dict[str, tuple[str, ...]] = {
+    "analyst": ("general", "time", "comparisons", "relationships"),
+    "researcher": ("general", "distributions", "relationships", "locations"),
+    "decision_maker": ("general", "time", "comparisons"),
+    "technical": ("general", "quality", "relationships", "distributions"),
     "ceo": ("general", "sales", "profits"),
     "sales": ("sales", "products", "regions", "customers"),
     "marketing": ("marketing", "customers", "products"),
@@ -99,8 +109,9 @@ class DashboardAgent(Agent):
         decision = self._audience_decision(state)
         answer = yield decision
 
+        default_audience = "ceo" if state.understanding.is_business else "analyst"
         if answer.is_skip:
-            audience = "ceo"
+            audience = default_audience
             self.note(state, "Built the standard overview, aimed at a general reader.")
         elif answer.is_custom:
             self.capture_custom(state, decision, answer, category="context")
@@ -111,7 +122,7 @@ class DashboardAgent(Agent):
                 f"{AUDIENCES[audience][0].lower()}.",
             )
         else:
-            audience = answer.payload.get("audience", "ceo")
+            audience = answer.payload.get("audience", default_audience)
 
         dashboards = [self._overview(state, audience)]
         dashboards.extend(self._per_area(state))
@@ -131,49 +142,74 @@ class DashboardAgent(Agent):
     # -- decision ----------------------------------------------------------
 
     def _audience_decision(self, state: PipelineState):
-        listing = "\n".join(
-            f"- {name}: wants to see {wants}" for name, wants in AUDIENCES.values()
+        ar = state.language.code == "ar"
+        business = state.understanding.is_business
+        audience_ar = {
+            "ceo": ("الإدارة أو صاحب المشروع", "اتجاه النشاط بالكامل بسرعة"),
+            "sales": ("مدير المبيعات", "المنتجات والمناطق والقنوات التي تحقق المبيعات"),
+            "marketing": ("مدير التسويق", "القنوات والحملات الأعلى عائدًا"),
+            "finance": ("المدير المالي", "الأرباح بعد التكاليف ومصادر تراجع الهامش"),
+            "operations": ("مدير العمليات", "سير العمل ونقاط التعطل"),
+            "analyst": ("محلل البيانات", "الأنماط الرئيسية والأدلة والتحفظات"),
+            "researcher": ("باحث أو خبير مجال", "التوزيعات والعلاقات والحالات غير المعتادة"),
+            "decision_maker": ("صانع القرار", "النتائج الأهم وما يحتاج إلى اهتمام"),
+            "technical": ("الفريق التقني", "جودة البيانات والقياسات التفصيلية والاستثناءات"),
+        }
+        keys = (
+            ["ceo", "sales", "marketing", "finance", "operations"]
+            if business else ["analyst", "researcher", "decision_maker", "technical"]
         )
+        listing = "\n".join(
+            (f"- {audience_ar[key][0]}: {audience_ar[key][1]}" if ar else f"- {name}: wants to see {wants}")
+            for key in keys for name, wants in [AUDIENCES[key]]
+        )
+        default = "ceo" if business else "analyst"
         return self.decide(
-            topic="Who the dashboard is for",
-            question="Who will actually open this dashboard?",
+            topic="مستخدم لوحة المتابعة" if ar else "Who the dashboard is for",
+            question="مين الشخص اللي هيستخدم لوحة المتابعة؟" if ar else "Who will actually open this dashboard?",
             context=(
-                "The same findings get laid out differently depending on who is "
+                ("ترتيب نفس النتائج يختلف حسب الشخص الذي سيقرأها، واختيار التصميم الخطأ هو سبب رئيسي لعدم استخدام لوحات المتابعة:\n\n"
+                 f"{listing}\n\nسننشئ أيضًا لوحة منفصلة لكل مجال تم تحليله، لذلك لن تفقد أي نتيجة.")
+                if ar else
+                ("The same findings get laid out differently depending on who is "
                 "reading them, and the wrong layout is the main reason "
                 "dashboards go unused:\n\n"
                 f"{listing}\n\n"
                 "Whoever you choose, a separate dashboard is still built for each "
-                "area we explored, so nothing is lost."
+                "area we explored, so nothing is lost.")
             ),
             suggestion=Option(
-                label="A chief executive or business owner",
+                label=(audience_ar[default][0] if ar else AUDIENCES[default][0]),
                 rationale=(
-                    "Puts four headline figures and the trend at the top, with "
-                    "the detail underneath. The safest layout when more than one "
-                    "person will open it."
+                    "يضع أربعة مؤشرات رئيسية والاتجاه في الأعلى ثم التفاصيل، وهو الأنسب للاستخدام العام."
+                    if ar else "Puts four headline figures and the trend at the top, with the detail underneath. The safest layout when more than one person will open it."
                 ),
-                payload={"audience": "ceo"},
+                payload={"audience": default},
             ),
             alternatives=[
                 Option(
-                    label=f"A {name.lower()}",
-                    rationale=f"Leads with {wants}.",
+                    label=(audience_ar[key][0] if ar else f"A {name.lower()}"),
+                    rationale=((f"يبدأ بـ{audience_ar[key][1]}.") if ar else f"Leads with {wants}."),
                     payload={"audience": key},
                 )
-                for key, (name, wants) in AUDIENCES.items()
-                if key != "ceo"
+                for key in keys for name, wants in [AUDIENCES[key]]
+                if key != default
             ],
             custom_prompt=(
-                "Describe who will use this and what decision they need to make "
-                "with it."
+                "اشرح من سيستخدم اللوحة وما القرار الذي يحتاج إلى اتخاذه."
+                if ar else "Describe who will use this and what decision they need to make with it."
             ),
-            skip_effect="A general overview is built, aimed at a business owner.",
+            skip_effect=("سيتم إنشاء نظرة عامة موجهة لمستخدم البيانات." if ar else "A general overview is built for the person using the data."),
         )
 
     @staticmethod
     def _audience_from_text(text: str) -> str:
         lowered = text.casefold()
         keywords = {
+            "analyst": ("analyst", "analysis", "data team", "محلل", "تحليل"),
+            "researcher": ("research", "scientist", "expert", "academic", "باحث", "عالم", "خبير"),
+            "decision_maker": ("decision", "policy", "manager", "قرار", "سياسة", "مدير"),
+            "technical": ("technical", "engineer", "developer", "quality", "تقني", "مهندس", "جودة"),
             "ceo": ("ceo", "owner", "founder", "director", "board", "executive", "chief"),
             "sales": ("sales", "commercial", "account manager", "revenue team"),
             "marketing": ("marketing", "campaign", "brand", "growth team", "advertis"),
@@ -183,13 +219,26 @@ class DashboardAgent(Agent):
         for audience, words in keywords.items():
             if any(word in lowered for word in words):
                 return audience
-        return "ceo"
+        return "analyst"
 
     # -- layout ------------------------------------------------------------
 
     def _overview(self, state: PipelineState, audience: str) -> Dashboard:
         """The main dashboard, ordered for the chosen reader."""
         name, wants = AUDIENCES[audience]
+        ar = state.language.code == "ar"
+        audience_names_ar = {
+            "ceo": "الإدارة أو صاحب المشروع",
+            "sales": "مدير المبيعات",
+            "marketing": "مدير التسويق",
+            "finance": "المدير المالي",
+            "operations": "مدير العمليات",
+            "analyst": "محلل البيانات",
+            "researcher": "باحث أو خبير مجال",
+            "decision_maker": "صانع القرار",
+            "technical": "الفريق التقني",
+        }
+        shown_name = audience_names_ar.get(audience, name) if ar else name
         panels: list[DashboardPanel] = []
 
         wanted_kpis = AUDIENCE_KPIS.get(audience, ())
@@ -217,12 +266,12 @@ class DashboardAgent(Agent):
 
         return Dashboard(
             id="overview",
-            title=f"Overview for a {name.lower()}",
-            audience=name,
+            title=(f"نظرة عامة: {shown_name}" if ar else f"Overview for a {name.lower()}"),
+            audience=shown_name,
             description=(
-                f"Built for someone who wants {wants}. The figures across the top "
-                "are the state of the business; the charts below show what is "
-                "behind them."
+                "تبدأ اللوحة بأهم الأرقام، ثم تعرض الرسومات التي تفسر ما وراءها."
+                if ar else
+                f"Built for someone who wants {wants}. The figures across the top summarise the dataset; the charts below show what is behind them."
             ),
             panels=panels,
         )
@@ -240,11 +289,12 @@ class DashboardAgent(Agent):
             boards.append(
                 Dashboard(
                     id=f"area_{axis}",
-                    title=AXES.get(axis, axis.title()),
-                    audience=AXES.get(axis, axis.title()),
+                    title=axis_label(axis, state.language),
+                    audience=axis_label(axis, state.language),
                     description=(
-                        f"Everything the data says about "
-                        f"{AXES.get(axis, axis).lower()}, in one place."
+                        f"كل ما توضحه البيانات عن {axis_label(axis, state.language)} في مكان واحد."
+                        if state.language.code == "ar" else
+                        f"Everything the data says about {AXES.get(axis, axis).lower()}, in one place."
                     ),
                     panels=[
                         DashboardPanel("chart", chart.id) for chart in charts[:MAX_PANELS]

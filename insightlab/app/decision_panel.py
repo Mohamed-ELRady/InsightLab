@@ -73,9 +73,9 @@ def render(decision: Decision, language=DEFAULT) -> Answer | None:
     return Answer.custom(decision, custom_text)
 
 
-def render_evidence(decision: Decision) -> None:
+def render_evidence(decision: Decision, language=DEFAULT) -> None:
     """Show the raw figures a decision rests on, for anyone who wants them."""
     if not decision.evidence:
         return
-    with st.expander(translate("decision.evidence", DEFAULT)):
+    with st.expander(translate("decision.evidence", language)):
         st.json(decision.evidence, expanded=False)

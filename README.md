@@ -20,6 +20,16 @@ questions, and you can ask it questions back.
 
 Available in English and Arabic.
 
+## What happens first
+
+Immediately after a file is loaded, InsightLab establishes what the data is
+about before it cleans or calculates anything. It shows the business area, what
+one row appears to represent, the useful columns, the period covered and any
+obvious trust concerns. It asks only for details the file cannot establish and
+whose answer would materially change a total, grouping or interpretation. If
+nothing important is ambiguous, the understanding stage closes automatically
+and the workflow moves on.
+
 ## Why it stops and asks
 
 Automated analysis tools go wrong in a predictable way. They see 24 identical
@@ -36,13 +46,14 @@ answer, so InsightLab asks them, and remembers the answers.
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 streamlit run insightlab/app/main.py
 ```
 
-Open the **Connect an AI model** panel in the sidebar, choose a provider, paste
-your key and test the connection. The key stays in that app session and is
-never written to disk or saved with an analysis.
+Open the **Connect an AI model** panel in the sidebar, choose a primary provider,
+add one or more keys, then optionally choose fallback providers in priority
+order. **Test all connections** checks every configured key separately. Keys
+stay in that app session and are never written to disk or saved with an analysis.
 
 There is a sample dataset built in — click **Try it with sample data** to see the
 whole flow without uploading anything.
@@ -50,8 +61,14 @@ whole flow without uploading anything.
 To run an analysis end to end with no questions asked:
 
 ```bash
-python main.py data/samples/retail_sales.csv
+python main.py data/samples/retail_sales.csv --project "My business"
 ```
+
+The CLI and web app use the same durable project memory, feedback profile and
+evaluation history. Reuse the same `--project` name (and the same workspace) to
+carry approved business rules into later analyses. If `--project` is omitted,
+the CLI uses a project named `CLI analyses`. The older `--memory` option remains
+available for a one-time import of a `business_memory.json` file.
 
 ## Running without an API key
 
@@ -66,10 +83,60 @@ consultant. Nothing breaks in between.
 
 ## Bring your own model from the interface
 
-No configuration file is required for the web app. Choose a provider and model
-from the sidebar, enter the API key, and verify the connection before starting
-the run. Every provider also accepts a custom model ID, so a newly released
-model does not have to wait for a code update.
+### Optional: sign in with ChatGPT (local app)
+
+Choose **ChatGPT · via Codex (local)** in the provider panel, click **Sign in
+with ChatGPT**, open **Continue to ChatGPT**, and finish OpenAI's login in a
+browser on the same computer. Return to InsightLab and click **Check sign-in**,
+then start your analysis. No API key is needed. The other providers are unchanged.
+
+This uses the **Codex allowance available to your ChatGPT account**, not the
+OpenAI API and not the ChatGPT website's chat models. Access depends on your
+plan/workspace, model availability and remaining limits; it is **not unlimited
+free usage**. Account checking does not call the model. An analysis consumes
+Codex usage; InsightLab never uses an API provider unless you explicitly add it
+to the fallback chain, and never buys credits or changes your plan. Your
+account's own billing and usage policies still apply.
+
+Requirements: the official [Codex CLI](https://developers.openai.com/codex/cli/)
+on `PATH` (`npm install -g @openai/codex`), internet access and an account with
+Codex access. The integration was checked against CLI `0.154.0-alpha.6.2`;
+app-server is evolving, so update the CLI if a protocol error occurs.
+
+The app defaults to binding to `127.0.0.1`. This integration is for **trusted,
+local, interactive use only**: do not expose it using tunnels or a public reverse
+proxy. On non-loopback bindings the login panel is disabled. For a hosted,
+multi-user service, use the existing API providers instead of sharing a desktop
+subscription. This is not a general-purpose public “Login with ChatGPT” OAuth app.
+
+Each browser session gets a separate Codex process and private temporary
+configuration. Codex manages OAuth with its **in-memory credential store**;
+InsightLab does not read tokens, copy `~/.codex/auth.json`, or reuse/change your
+desktop or CLI login. Credentials are not saved with datasets or reports.
+Sign out explicitly when done; restarting the app requires signing in again.
+Session cleanup stops the process when Streamlit releases the session (closing
+a browser tab is not guaranteed to disconnect immediately).
+
+Only analysis prompts/data excerpts are submitted to OpenAI. The process runs
+outside the project with shell, browser, plugins and connected-app features
+disabled, a read-only sandbox and denied server-side tool requests. The existing
+pandas pipeline still computes all numbers. Limits, connectivity failures and
+model failures are shown in the sidebar. If you configured more keys or
+providers, InsightLab moves through them in order; otherwise the statistical
+fallback remains available. A failed route is not retried at every later stage
+in the same run.
+
+Integration references: [Codex authentication](https://developers.openai.com/codex/auth/)
+and [Codex app-server](https://developers.openai.com/codex/app-server/).
+
+### API providers
+
+No configuration file is required for the web app. Choose a provider and model,
+set how many keys it has, then add any fallback providers. Runtime order is
+strict: key 1, key 2 and so on for the primary provider, then every key of the
+next provider. The first successful route stays active for later requests. Every
+provider also accepts a custom model ID, so a newly released model does not have
+to wait for a code update.
 
 | Provider | Access | Good starting point |
 |---|---|---|
@@ -97,12 +164,22 @@ Successful model responses are cached against the complete request inside the
 current session. Repeating the same question or rerunning the same UI action
 reuses the exact answer instead of spending credit again; any change in the
 data, prompt, model, language or expected output creates a new request. The
-connection check is capped to a tiny response and a successful check is reused
-for as long as its provider, model, endpoint and key remain unchanged. The
-sidebar shows model tasks sent and repeat tasks avoided.
+cache also survives rotation between API keys for the same model because a
+credential changes access, not the answer. The connection check is capped to a
+tiny 16-token response and a successful check is reused for as long as the
+provider chain remains unchanged.
 
-These savings never skip an analytical check, swap in a weaker model or alter a
-calculated result. They remove duplicated work only.
+Every task has an output ceiling matched to its shape: a two-sentence answer is
+not allowed to consume the allowance of an eight-insight JSON response. Clear
+business rules and focus questions are parsed locally first and call a model
+only when deterministic parsing cannot safely resolve them. Schema prompts use
+a compact representation that preserves every column, role, cardinality,
+missing rate, numeric range and date period without sending row values. The
+sidebar shows estimated tokens used and tokens avoided through cache reuse.
+
+These savings never skip an analytical check, remove a column or evidence item,
+swap in a weaker model, or alter a calculated result. They remove duplicated or
+unbounded model work only.
 
 ## Nothing reaches you unchecked
 
@@ -191,17 +268,59 @@ This is built once in [`insightlab/core/decision.py`](insightlab/core/decision.p
 and rendered once in [`insightlab/app/decision_panel.py`](insightlab/app/decision_panel.py).
 No agent implements its own.
 
-## Business memory
+## Project memory and human-approved learning
 
-Anything you state about your business is written to one shared store that every
-agent reads for the rest of the project:
+Every analysis now belongs to an explicit **memory project**. Anything you state
+about that business is written to one durable, local store that its agents read
+automatically on the next run:
 
 > "VIP customers are the ones whose purchases exceed 5,000."
 > "Peak season starts in November."
 > "Ignore cancelled invoices."
 
-It is saved with the run as `business_memory.json`. Point a later analysis at it
-and none of those questions get asked again.
+No previous-run file needs to be selected. Pick the same project and its active
+memory is loaded automatically. Projects are hard boundaries: a fact learned in
+one project is never retrieved for another.
+
+The memory page shows every record's status, source, scope and version. A rule
+can apply to the whole project or only to datasets carrying named columns. It
+can also expire on a chosen date. Editing, disabling, reactivating or automatic
+expiry creates an audit version rather than erasing history. The per-run
+`business_memory.json` is still exported as a portable snapshot, while the live
+store is SQLite at `data/runs/insightlab_memory.sqlite3` by default.
+
+### How the self-improving loop works
+
+Each conclusion has useful, not-useful and incorrect feedback. Marking something
+incorrect requires a reusable correction. That correction becomes a **pending
+lesson**, not a trusted rule. In the Memory tab the owner can edit and approve it
+or reject it. Only approval promotes it to active project memory; the next run
+then retrieves it, tests it against the new data and uses it in agent context.
+
+```text
+insight → owner feedback → pending lesson → owner review
+        → approved project memory → tested on the next dataset
+```
+
+Useful/not-useful ratings now build an explainable profile of preferred analysis
+areas, KPIs and chart types. On the next run that profile changes only the order
+of supported choices and finished content; it can never alter a calculation,
+filter a row or bypass verification. KPI and chart cards accept the same small
+feedback signal. The project also remembers explicit presentation preferences
+for explanation detail, question style and report audience.
+
+The **Improvement** tab records a deterministic quality score for every finished
+run (pipeline completion, grounded insights, evidence, actions, chart links and
+errors). Its reusable evaluation cases contain structure only—no uploaded rows,
+file names, titles, conclusions or evidence text. Learning strength is held in a
+versioned policy. A proposed policy must pass an offline historical check and
+then be approved by the owner before activation; the previous version remains
+available for one-click rollback.
+
+This is deliberately controlled self-improvement, not autonomous code rewriting
+or model fine-tuning. InsightLab does not promote model guesses, copy memory
+between projects, silently change pandas calculations, or reuse a rejected
+lesson. The raw uploaded dataset is not copied into the memory or evaluation database.
 
 ## The agents
 
@@ -247,6 +366,13 @@ never cycled, a single-hue ramp for magnitude, a diverging ramp with a neutral
 midpoint for correlation, and reserved status colours that never become a data
 series. Every chart carries the numbers as a table alongside it. Dark mode is a
 selected set of steps from the same ramps, not an inversion.
+
+After the automatic analysis, **Create another chart** in the Charts tab lets
+the user choose the exact type and one or two columns. Bar, line, area, scatter,
+histogram, box, donut and heatmap views are supported, with count, total,
+average or median where aggregation is meaningful. The combination is validated,
+large views are bounded for responsiveness, and the finished chart and its
+accessible data table are saved with the run.
 
 **Failure is contained.** A stage that breaks is marked failed and the run
 continues. A report format that fails to render does not cost the others. A

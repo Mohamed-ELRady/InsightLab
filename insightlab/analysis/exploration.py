@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-from ..core.state import Chart, DatasetProfile, Role
+from ..core.state import Chart, DatasetProfile, DatasetUnderstanding, Role
 from . import theme
 from .profiling import try_parse_datetime
 
@@ -30,6 +30,12 @@ AXES: dict[str, str] = {
     "profits": "Profit and margins",
     "regions": "Regions and locations",
     "operations": "Operations and fulfilment",
+    "time": "Change over time",
+    "comparisons": "Groups and comparisons",
+    "distributions": "Distributions and unusual values",
+    "relationships": "Relationships between measurements",
+    "locations": "Places and spatial patterns",
+    "quality": "Data quality",
 }
 
 #: How many bars a comparison chart shows before the tail is folded into Other.
@@ -97,7 +103,11 @@ def _first_named(names: list[str], keywords: tuple[str, ...]) -> str | None:
     return None
 
 
-def resolve_columns(frame: pd.DataFrame, profile: DatasetProfile) -> Columns:
+def resolve_columns(
+    frame: pd.DataFrame,
+    profile: DatasetProfile,
+    understanding: DatasetUnderstanding | None = None,
+) -> Columns:
     """Work out which columns are usable for charting."""
     present = set(frame.columns)
     dates = [
@@ -145,7 +155,11 @@ def resolve_columns(frame: pd.DataFrame, profile: DatasetProfile) -> Columns:
             categories.append(name)
 
     primary = None
+    if understanding and understanding.primary_measure in measures:
+        primary = understanding.primary_measure
     for keywords in (("revenue",), ("sales", "total"), ("amount", "value"), ("profit",)):
+        if primary:
+            break
         for name in measures:
             if any(keyword in name.casefold() for keyword in keywords):
                 primary = name
@@ -167,7 +181,11 @@ def resolve_columns(frame: pd.DataFrame, profile: DatasetProfile) -> Columns:
             if column.name in present
         },
         primary_measure=primary,
-        primary_date=dates[0] if dates else None,
+        primary_date=(
+            understanding.primary_date
+            if understanding and understanding.primary_date in dates
+            else (dates[0] if dates else None)
+        ),
     )
 
 
@@ -231,16 +249,20 @@ def _wrap(figure: go.Figure, chart_id: str, title: str, kind: str, description: 
 
 
 def trend_chart(
-    frame: pd.DataFrame, date_column: str, measure: str, axis: str
+    frame: pd.DataFrame, date_column: str, measure: str, axis: str, *, how: str = "sum"
 ) -> Chart | None:
-    """Total of ``measure`` per month, as a line."""
+    """Aggregate ``measure`` per month, as a line."""
     dates = _datetime(frame, date_column)
+    # Periods do not carry timezone information. Remove it explicitly so this
+    # deliberate monthly grouping does not emit a warning on every chart.
+    if getattr(dates.dt, "tz", None) is not None:
+        dates = dates.dt.tz_localize(None)
     values = _numeric(frame, measure)
     working = pd.DataFrame({"period": dates.dt.to_period("M"), "value": values}).dropna()
     if working.empty:
         return None
 
-    grouped = working.groupby("period", observed=True)["value"].sum().sort_index()
+    grouped = working.groupby("period", observed=True)["value"].agg(how).sort_index()
     if len(grouped) < MIN_TREND_POINTS:
         return None
 
@@ -264,8 +286,15 @@ def trend_chart(
     change = ((last - first) / first * 100) if first else 0.0
     peak_period = str(grouped.idxmax())
     direction = "grew" if change > 2 else ("fell" if change < -2 else "stayed flat")
+    readable = measure.replace("_", " ")
+    quantity = {
+        "count": "Event count",
+        "mean": f"Average {readable}",
+        "median": f"Typical {readable}",
+        "sum": readable.title(),
+    }.get(how, readable.title())
     description = (
-        f"{measure.replace('_', ' ').title()} {direction} by {abs(change):.0f}% between "
+        f"{quantity} {direction} by {abs(change):.0f}% between "
         f"{labels[0]} and {labels[-1]}, peaking in {peak_period} at "
         f"{_compact(float(grouped.max()))}."
     )
@@ -275,12 +304,14 @@ def trend_chart(
     table["Month"] = table["Month"].astype(str)
     return _wrap(
         figure,
-        f"trend_{measure}",
-        f"{measure.replace('_', ' ').title()} over time",
+        f"trend_{measure}" if how == "sum" else f"trend_{measure}_{how}",
+        f"{quantity} over time",
         "line",
         description,
         axis,
         table,
+        measure=measure,
+        aggregation=how,
     )
 
 
@@ -853,7 +884,10 @@ def missing_values_chart(profile: DatasetProfile, axis: str = "general") -> Char
 
 
 def _axis_plan(
-    axis: str, frame: pd.DataFrame, columns: Columns
+    axis: str,
+    frame: pd.DataFrame,
+    columns: Columns,
+    understanding: DatasetUnderstanding | None = None,
 ) -> list[Chart]:
     """Build the charts that answer one business question."""
     charts: list[Chart] = []
@@ -952,16 +986,73 @@ def _axis_plan(
         if date and quantity:
             add(trend_chart(frame, date, quantity, axis))
 
+    elif axis == "time":
+        if date and measure:
+            add(trend_chart(frame, date, measure, axis, how="count"))
+            add(trend_chart(
+                frame, date, measure, axis,
+                how=understanding.aggregation_for(measure) if understanding else "mean",
+            ))
+
+    elif axis in {"comparisons", "locations"}:
+        preferred = understanding.primary_category if understanding else ""
+        category = preferred if preferred in columns.categories else None
+        if axis == "locations":
+            category = columns.category_named(
+                "place", "location", "region", "country", "city", "station", "net"
+            ) or category
+        category = category or (columns.categories[0] if columns.categories else None)
+        if category and measure:
+            how = understanding.aggregation_for(measure) if understanding else "mean"
+            add(category_bar(frame, category, measure, axis, how=how))
+            add(category_bar(frame, category, measure, axis, how="count"))
+            add(box_by_category(frame, category, measure, axis))
+
+    elif axis == "distributions":
+        ordered = ([measure] if measure else []) + [
+            item for item in columns.measures if item != measure
+        ]
+        if understanding and understanding.domain_family == "earth_science" and "depth" in ordered:
+            ordered.remove("depth")
+            ordered.insert(1, "depth")
+        for candidate in ordered[:3]:
+            add(distribution(frame, candidate, axis))
+
+    elif axis == "relationships":
+        add(correlation_heatmap(frame, columns.measures, axis))
+        if len(columns.measures) >= 2:
+            left = measure or columns.measures[0]
+            right = (
+                "depth"
+                if understanding and understanding.domain_family == "earth_science"
+                and "depth" in columns.measures and left != "depth"
+                else next((item for item in columns.measures if item != left), None)
+            )
+            if right:
+                add(scatter_relationship(frame, left, right, axis))
+
+    elif axis == "quality":
+        # The profile-aware missing-values chart is added by general_charts.
+        pass
+
     return charts
 
 
 def general_charts(
-    frame: pd.DataFrame, profile: DatasetProfile, columns: Columns
+    frame: pd.DataFrame,
+    profile: DatasetProfile,
+    columns: Columns,
+    understanding: DatasetUnderstanding | None = None,
 ) -> list[Chart]:
     """The charts worth showing whatever the user asked to focus on."""
     charts: list[Chart] = []
     if columns.primary_date and columns.primary_measure:
-        chart = trend_chart(frame, columns.primary_date, columns.primary_measure, "general")
+        how = "sum"
+        if understanding and not understanding.is_business:
+            how = "count"
+        chart = trend_chart(
+            frame, columns.primary_date, columns.primary_measure, "general", how=how
+        )
         if chart:
             charts.append(chart)
     if columns.primary_measure:
@@ -983,9 +1074,10 @@ def build_charts(
     axes: list[str],
     *,
     include_general: bool = True,
+    understanding: DatasetUnderstanding | None = None,
 ) -> list[Chart]:
     """Every chart for the requested business questions, deduplicated."""
-    columns = resolve_columns(frame, profile)
+    columns = resolve_columns(frame, profile, understanding)
     charts: list[Chart] = []
     seen: set[str] = set()
 
@@ -996,20 +1088,41 @@ def build_charts(
                 charts.append(chart)
 
     if include_general:
-        extend(general_charts(frame, profile, columns))
+        extend(general_charts(frame, profile, columns, understanding))
     for axis in axes:
         if axis in AXES:
-            extend(_axis_plan(axis, frame, columns))
+            extend(_axis_plan(axis, frame, columns, understanding))
     return charts
 
 
-def available_axes(frame: pd.DataFrame, profile: DatasetProfile) -> list[str]:
+def available_axes(
+    frame: pd.DataFrame,
+    profile: DatasetProfile,
+    understanding: DatasetUnderstanding | None = None,
+) -> list[str]:
     """Business questions this dataset can actually answer.
 
     Offering the user a "regions" analysis when there is no location column
     would waste their time, so the menu is filtered to what the data supports.
     """
-    columns = resolve_columns(frame, profile)
+    columns = resolve_columns(frame, profile, understanding)
+    if understanding and not understanding.is_business:
+        supported: list[str] = []
+        if columns.primary_date and columns.primary_measure:
+            supported.append("time")
+        if columns.categories and columns.primary_measure:
+            supported.append("comparisons")
+        if columns.primary_measure:
+            supported.append("distributions")
+        if len(columns.measures) >= 2:
+            supported.append("relationships")
+        if columns.category_named(
+            "place", "location", "region", "country", "city", "station", "net"
+        ):
+            supported.append("locations")
+        if any(column.missing_rate for column in profile.columns):
+            supported.append("quality")
+        return supported or ["quality"]
     supported: list[str] = []
     if columns.primary_measure:
         supported.append("sales")

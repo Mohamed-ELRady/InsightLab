@@ -88,9 +88,22 @@ def header_looks_wrong(frame: pd.DataFrame) -> bool:
 
 def read_excel_sheets(path: Path) -> list[str]:
     try:
-        return list(pd.ExcelFile(path).sheet_names)
+        try:
+            with pd.ExcelFile(path, engine="calamine") as workbook:
+                return list(workbook.sheet_names)
+        except Exception:  # noqa: BLE001 - compatibility fallback for edge cases
+            with pd.ExcelFile(path) as workbook:
+                return list(workbook.sheet_names)
     except Exception as error:  # pragma: no cover - depends on the file
         raise LoadError(f"This workbook could not be opened: {error}") from error
+
+
+def read_excel_frame(path: Path, **options) -> pd.DataFrame:
+    """Read a sheet through the fast Rust engine, with pandas' safe fallback."""
+    try:
+        return pd.read_excel(path, engine="calamine", **options)
+    except Exception:  # noqa: BLE001 - format-specific engines reject different edge cases
+        return pd.read_excel(path, **options)
 
 
 class DataLoaderAgent(Agent):
@@ -101,12 +114,12 @@ class DataLoaderAgent(Agent):
     persona = AgentPersona(
         role="Data intake specialist",
         goal=(
-            "Read the owner's file correctly on the first attempt and tell them "
+            "Read the user's file correctly on the first attempt and tell them "
             "plainly what arrived, so they can spot straight away if it is not "
             "the file they meant to send."
         ),
         backstory=(
-            "You have opened thousands of business exports and you know every way "
+            "You have opened thousands of datasets from many domains and know how "
             "they go wrong: a title row above the headers, four sheets where only "
             "one holds data, semicolons instead of commas. You fix what you can "
             "silently and ask only about the things that would change the numbers."
@@ -115,6 +128,7 @@ class DataLoaderAgent(Agent):
 
     def run(self, state: PipelineState) -> Flow:
         state.begin_stage(self.stage)
+        state.report_progress(self.stage, 0.04, "progress.load.detect")
 
         path = state.source_path
         if path is None or not Path(path).exists():
@@ -139,6 +153,7 @@ class DataLoaderAgent(Agent):
         state.source_format = SUPPORTED[suffix]
 
         try:
+            state.report_progress(self.stage, 0.15, "progress.load.read")
             if suffix in {".xlsx", ".xlsm", ".xls"}:
                 frame = yield from self._load_excel(state, path)
             else:
@@ -151,6 +166,7 @@ class DataLoaderAgent(Agent):
             state.skip_stage(self.stage, "Loading was skipped, so there is nothing to analyse.")
             return
 
+        state.report_progress(self.stage, 0.78, "progress.load.tidy")
         frame = self._tidy(frame)
         if frame.empty:
             state.fail_stage(
@@ -159,7 +175,10 @@ class DataLoaderAgent(Agent):
             )
             return
 
-        state.raw_frame = frame.copy()
+        # Later transformations replace ``state.frame`` with a new dataframe;
+        # they do not mutate this one in place. Keeping the original reference
+        # avoids briefly doubling memory for a large upload.
+        state.raw_frame = frame
         # Taken now, from the file as it arrived: cleaning and feature
         # engineering both change the columns in data-dependent ways, so a
         # fingerprint taken later would never match a previous run.
@@ -171,6 +190,7 @@ class DataLoaderAgent(Agent):
             self.stage,
             f"Loaded {len(frame):,} rows and {frame.shape[1]} columns from {path.name}.",
         )
+        state.report_progress(self.stage, 0.96, "progress.load.ready")
         state.finish_stage(
             self.stage,
             f"Read {len(frame):,} rows and {frame.shape[1]} columns from "
@@ -193,7 +213,12 @@ class DataLoaderAgent(Agent):
         paths = [Path(state.source_path), *(Path(item) for item in state.extra_paths)]
         tables: list[joining.Table] = []
 
-        for path in paths:
+        for index, path in enumerate(paths):
+            state.report_progress(
+                self.stage,
+                0.08 + (0.62 * index / max(len(paths), 1)),
+                "progress.load.read",
+            )
             if not path.exists():
                 self.warn(state, f"{path.name} could not be found and was skipped.")
                 continue
@@ -225,7 +250,7 @@ class DataLoaderAgent(Agent):
         state.source_format = SUPPORTED.get(
             base.path.suffix.lower() if base.path else "", "data file"
         )
-        state.raw_frame = base.frame.copy()
+        state.raw_frame = base.frame
 
         from ..analysis.comparison import fingerprint
 
@@ -264,61 +289,66 @@ class DataLoaderAgent(Agent):
                 continue
 
             best = candidates[0]
+            ar = state.language.code == "ar"
             decision = self.decide(
-                topic=f"Attaching {other.name}",
+                topic=(f"ربط ملف {other.name}" if ar else f"Attaching {other.name}"),
                 question=(
-                    f"How does {other.name} relate to {base.name}?"
+                    f"ما العلاقة بين {other.name} و{base.name}؟" if ar else f"How does {other.name} relate to {base.name}?"
                 ),
                 context=(
-                    f"{other.describe()}\n\n"
+                    (f"الربط الصحيح يسمح باستخدام الملفين معًا، والربط الخطأ قد يكرر الصفوف ويضخّم الإجماليات. نعرض تأثير كل اختيار على عدد الصفوف.\n\n{best.describe()}")
+                    if ar else
+                    (f"{other.describe()}\n\n"
                     "Getting this right is what lets the analysis use both files "
                     "together - a margin needs cost, and cost often lives in a "
                     "second export. Getting it wrong quietly multiplies your "
                     "rows and inflates every total, so the effect on the row "
                     "count is given for each option.\n\n"
-                    f"{best.describe()}"
+                    f"{best.describe()}")
                 ),
                 suggestion=Option(
                     label=(
-                        f"Match {best.left_column} to {best.right_column}"
-                        + ("" if best.is_safe else " (this would multiply rows)")
+                        ((f"اربط {best.left_column} مع {best.right_column}") if ar else (f"Match {best.left_column} to {best.right_column}"))
+                        + (("" if best.is_safe else " (الربط سيكرر الصفوف)") if ar else ("" if best.is_safe else " (this would multiply rows)"))
                     ),
                     rationale=(
-                        f"{best.overlap:.0%} of values match and the row count "
-                        f"stays at {best.expected_rows:,}."
+                        (f"تتطابق {best.overlap:.0%} من القيم وسيصبح عدد الصفوف {best.expected_rows:,}.")
+                        if ar and best.is_safe else
+                        (f"تتطابق {best.overlap:.0%} من القيم، لكن عدد الصفوف سيرتفع من {best.left_rows:,} إلى {best.expected_rows:,}." if ar else
+                        (f"{best.overlap:.0%} of values match and the row count stays at {best.expected_rows:,}."
                         if best.is_safe
                         else (
                             f"{best.overlap:.0%} of values match, but the row "
                             f"count would rise from {best.left_rows:,} to "
                             f"{best.expected_rows:,}. Only choose this if one "
                             f"row in {base.name} genuinely has several matches."
-                        )
+                        )))
                     ),
                     payload={"index": 0},
                 ),
                 alternatives=[
                     Option(
-                        label=f"Match {item.left_column} to {item.right_column}",
-                        rationale=item.describe(),
+                        label=(f"اربط {item.left_column} مع {item.right_column}" if ar else f"Match {item.left_column} to {item.right_column}"),
+                        rationale=("خيار ربط بديل بين العمودين." if ar else item.describe()),
                         payload={"index": index},
                     )
                     for index, item in enumerate(candidates[1:4], start=1)
                 ]
                 + [
                     Option(
-                        label=f"Do not use {other.name}",
+                        label=(f"لا تستخدم {other.name}" if ar else f"Do not use {other.name}"),
                         rationale=(
-                            "The file is left out entirely and the analysis runs "
-                            f"on {base.name} alone."
+                            (f"سيتم استبعاد الملف وتشغيل التحليل على {base.name} فقط.")
+                            if ar else (f"The file is left out entirely and the analysis runs on {base.name} alone.")
                         ),
                         payload={"index": -1},
                     )
                 ],
                 custom_prompt=(
-                    f"Name the column in {base.name} and the column in "
-                    f"{other.name} that identify the same thing."
+                    (f"اكتب اسم العمود في {base.name} والعمود المقابل له في {other.name}.")
+                    if ar else (f"Name the column in {base.name} and the column in {other.name} that identify the same thing.")
                 ),
-                skip_effect=f"{other.name} is left out of the analysis.",
+                skip_effect=(f"سيتم استبعاد {other.name} من التحليل." if ar else f"{other.name} is left out of the analysis."),
                 evidence={
                     "candidates": [
                         {
@@ -406,7 +436,21 @@ class DataLoaderAgent(Agent):
         state.load_notes.append(f"Columns separated by {readable}, {encoding} encoding.")
 
         try:
-            frame = pd.read_csv(path, sep=delimiter, encoding=encoding, low_memory=False)
+            options = {"sep": delimiter, "encoding": encoding}
+            # Arrow parses large CSV files on several CPU cores and is
+            # considerably faster. It is optional at runtime; unusual CSVs or
+            # installations without it fall back to pandas' mature C parser.
+            if path.stat().st_size >= 8 * 1024 * 1024:
+                try:
+                    frame = pd.read_csv(path, engine="pyarrow", **options)
+                except Exception:  # noqa: BLE001 - fall back for any Arrow limitation
+                    frame = pd.read_csv(
+                        path, low_memory=False, memory_map=True, **options
+                    )
+            else:
+                frame = pd.read_csv(
+                    path, low_memory=False, memory_map=True, **options
+                )
         except Exception as error:
             raise LoadError(
                 f"The file could not be read as a table: {error}"
@@ -423,40 +467,40 @@ class DataLoaderAgent(Agent):
 
         sheet = sheets[0]
         if len(sheets) > 1:
+            ar = state.language.code == "ar"
             sizes = self._sheet_sizes(path, sheets)
             largest = max(sizes, key=lambda name: sizes[name])
             listing = ", ".join(
                 f"{name} ({sizes[name]:,} rows)" for name in sheets[:10]
             )
             decision = self.decide(
-                topic="Which sheet to analyse",
-                question=f"This workbook has {len(sheets)} sheets. Which one holds the data you want analysed?",
+                topic="ورقة العمل المطلوب تحليلها" if ar else "Which sheet to analyse",
+                question=(f"ملف Excel يحتوي على {len(sheets)} أوراق. أي ورقة فيها البيانات المطلوبة؟" if ar else f"This workbook has {len(sheets)} sheets. Which one holds the data you want analysed?"),
                 context=(
-                    f"The sheets are: {listing}. Sheets with very few rows are "
-                    "usually notes, lookup lists or a summary rather than the "
-                    "underlying records."
+                    (f"الأوراق هي: {listing}. الأوراق ذات الصفوف القليلة تكون غالبًا ملاحظات أو قوائم مساعدة أو ملخصًا.")
+                    if ar else (f"The sheets are: {listing}. Sheets with very few rows are usually notes, lookup lists or a summary rather than the underlying records.")
                 ),
                 suggestion=Option(
-                    label=f"Analyse the {largest} sheet",
+                    label=(f"حلّل ورقة {largest}" if ar else f"Analyse the {largest} sheet"),
                     rationale=(
-                        f"It has the most rows ({sizes[largest]:,}), which usually "
-                        "means it holds the actual records rather than a summary."
+                        (f"فيها أكبر عدد من الصفوف ({sizes[largest]:,})، ولذلك يُرجح أنها تحتوي على السجلات الأساسية.")
+                        if ar else (f"It has the most rows ({sizes[largest]:,}), which usually means it holds the actual records rather than a summary.")
                     ),
                     payload={"sheet": largest},
                 ),
                 alternatives=[
                     Option(
-                        label=f"Analyse {name}",
-                        rationale=f"{sizes[name]:,} rows.",
+                        label=(f"حلّل {name}" if ar else f"Analyse {name}"),
+                        rationale=(f"{sizes[name]:,} صفًا." if ar else f"{sizes[name]:,} rows."),
                         payload={"sheet": name},
                     )
                     for name in sheets
                     if name != largest
                 ][:6],
-                custom_prompt="Type the exact name of the sheet you want.",
+                custom_prompt=("اكتب اسم ورقة العمل بالضبط." if ar else "Type the exact name of the sheet you want."),
                 skip_effect=(
-                    f"We will use the first sheet, {sheets[0]}, without checking "
-                    "whether it is the right one."
+                    (f"سنستخدم أول ورقة، {sheets[0]}، من غير تأكيد إضافي.")
+                    if ar else (f"We will use the first sheet, {sheets[0]}, without checking whether it is the right one.")
                 ),
                 evidence={"sheets": sizes},
             )
@@ -478,7 +522,7 @@ class DataLoaderAgent(Agent):
 
         state.load_notes.append(f"Read from the sheet named {sheet}.")
         try:
-            frame = pd.read_excel(path, sheet_name=sheet)
+            frame = read_excel_frame(path, sheet_name=sheet)
         except Exception as error:
             raise LoadError(f"The sheet {sheet} could not be read: {error}") from error
 
@@ -487,10 +531,27 @@ class DataLoaderAgent(Agent):
         return frame
 
     def _sheet_sizes(self, path: Path, sheets: list[str]) -> dict[str, int]:
+        if path.suffix.lower() in {".xlsx", ".xlsm"}:
+            try:
+                from openpyxl import load_workbook
+
+                workbook = load_workbook(path, read_only=True, data_only=True)
+                try:
+                    return {
+                        sheet.title: max(0, int(sheet.max_row or 0) - 1)
+                        for sheet in workbook.worksheets
+                        if sheet.title in sheets
+                    }
+                finally:
+                    workbook.close()
+            except Exception:
+                # The existing pandas route is slower, but supports edge-case
+                # workbooks and remains a safe compatibility fallback.
+                pass
         sizes: dict[str, int] = {}
         for name in sheets:
             try:
-                sizes[name] = len(pd.read_excel(path, sheet_name=name, usecols=[0]))
+                sizes[name] = len(read_excel_frame(path, sheet_name=name, usecols=[0]))
             except Exception:
                 sizes[name] = 0
         return sizes
@@ -507,39 +568,42 @@ class DataLoaderAgent(Agent):
         sheet: str | None = None,
     ) -> Any:
         """Ask before assuming the real headers are further down the file."""
+        ar = state.language.code == "ar"
         preview = frame.head(4).to_string(index=False, max_colwidth=18)
         decision = self.decide(
-            topic="Where the column names are",
+            topic="مكان أسماء الأعمدة" if ar else "Where the column names are",
             question=(
-                "The top row of this file does not look like column names. "
-                "Should we skip it and use the row below instead?"
+                "الصف الأول لا يبدو كأسماء أعمدة. هل نتخطاه ونستخدم الصف التالي؟"
+                if ar else "The top row of this file does not look like column names. Should we skip it and use the row below instead?"
             ),
             context=(
-                "Files exported from accounting and till systems often start with "
+                ("بعض الملفات تبدأ بعنوان أو فترة زمنية قبل العناوين الحقيقية. قراءة العنوان كأسماء أعمدة ستنتج أسماء غير مفيدة.\n\n"
+                 f"بداية الملف:\n{preview}")
+                if ar else
+                ("Files exported from accounting and till systems often start with "
                 "a title or a date range above the real headings. If we read the "
                 "title as headings, every column ends up with a meaningless name.\n\n"
-                f"This is what the top of the file looks like:\n{preview}"
+                f"This is what the top of the file looks like:\n{preview}")
             ),
             suggestion=Option(
-                label="Skip the first row and use the next one as headings",
-                rationale="The current headings are blank or auto-numbered, which "
-                "means the real ones are almost certainly on the next line.",
+                label="تخطَّ الصف الأول واستخدم التالي كعناوين" if ar else "Skip the first row and use the next one as headings",
+                rationale=("العناوين الحالية فارغة أو مرقمة تلقائيًا، لذلك الأرجح أن العناوين الحقيقية في الصف التالي." if ar else "The current headings are blank or auto-numbered, which means the real ones are almost certainly on the next line."),
                 payload={"skiprows": 1},
             ),
             alternatives=[
                 Option(
-                    label="Skip the first two rows",
-                    rationale="Some exports put a title and a blank line above the headings.",
+                    label="تخطَّ أول صفين" if ar else "Skip the first two rows",
+                    rationale=("بعض الملفات تضع عنوانًا وصفًا فارغًا قبل أسماء الأعمدة." if ar else "Some exports put a title and a blank line above the headings."),
                     payload={"skiprows": 2},
                 ),
                 Option(
-                    label="Keep the file exactly as it is",
-                    rationale="Use it if the current headings are correct for your file.",
+                    label="احتفظ بالملف كما هو" if ar else "Keep the file exactly as it is",
+                    rationale=("اختاره لو العناوين الحالية صحيحة." if ar else "Use it if the current headings are correct for your file."),
                     payload={"skiprows": 0},
                 ),
             ],
-            custom_prompt="Tell us which row holds the column names, counting from 1.",
-            skip_effect="The file is read as-is, with the current headings kept.",
+            custom_prompt=("اكتب رقم الصف الذي يحتوي على أسماء الأعمدة، بدءًا من 1." if ar else "Tell us which row holds the column names, counting from 1."),
+            skip_effect=("سيتم قراءة الملف كما هو مع العناوين الحالية." if ar else "The file is read as-is, with the current headings kept."),
         )
         answer = yield decision
 
@@ -557,7 +621,7 @@ class DataLoaderAgent(Agent):
 
         try:
             if sheet is not None:
-                repaired = pd.read_excel(path, sheet_name=sheet, skiprows=skiprows)
+                repaired = read_excel_frame(path, sheet_name=sheet, skiprows=skiprows)
             else:
                 repaired = pd.read_csv(
                     path,

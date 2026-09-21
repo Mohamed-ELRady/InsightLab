@@ -52,28 +52,56 @@ class Agent:
 
     # -- reasoning helpers -------------------------------------------------
 
-    def explain(self, instruction: str, expected: str = "A short paragraph.") -> str | None:
+    def explain(self, instruction: str, expected: str = "A short paragraph.",
+                *, max_output_tokens: int = 500) -> str | None:
         """Ask the model for prose. ``None`` means fall back to a heuristic."""
-        return self.reasoning.ask(self.key, self.persona, instruction, expected)
+        return self.reasoning.ask(
+            self.key, self.persona, instruction, expected,
+            max_output_tokens=max_output_tokens,
+        )
 
-    def reason(self, instruction: str, shape: str) -> Any | None:
+    def reason(self, instruction: str, shape: str,
+               *, max_output_tokens: int | None = None) -> Any | None:
         """Ask the model for structured data. ``None`` means fall back."""
-        return self.reasoning.ask_json(self.key, self.persona, instruction, shape)
+        return self.reasoning.ask_json(
+            self.key, self.persona, instruction, shape,
+            max_output_tokens=max_output_tokens,
+        )
 
     def memory_block(self, state: PipelineState) -> str:
-        """The business facts so far, formatted for a prompt.
+        """The project and domain facts so far, formatted for a prompt.
 
         Returns an empty string when nothing is known, so prompts can leave the
         whole section out rather than telling the model there are no facts.
         """
         block = state.memory.as_prompt_block()
-        if not block:
+        preferences = getattr(state, "project_preferences", {})
+        directive = getattr(state, "analysis_directive", "").strip()
+        if not block and not preferences and not directive:
             return ""
-        return (
-            "\n\nThe owner has already told you the following about their "
-            f"business. Treat these as true and let them override anything the "
+        memory_text = (
+            "\n\nThe user has already established the following facts about this "
+            f"project and dataset. Treat these as true and let them override anything the "
             f"numbers suggest:\n{block}"
+            if block else ""
         )
+        if preferences:
+            preference_lines = "\n".join(
+                f"- {key.replace('_', ' ')}: {value}"
+                for key, value in sorted(preferences.items())
+            )
+            memory_text += (
+                "\n\nThe user has chosen these presentation preferences. They may change "
+                "wording, emphasis and question style, but never calculations or evidence:\n"
+                f"{preference_lines}"
+            )
+        if directive:
+            memory_text += (
+                "\n\nFor this run, the user explicitly requested the following. "
+                "Follow it wherever the available data supports it, and state "
+                "clearly when it cannot be done:\n- " + directive
+            )
+        return memory_text
 
     # -- decision helpers --------------------------------------------------
 
@@ -123,11 +151,11 @@ class Agent:
         *,
         category: str = "context",
     ) -> None:
-        """Save a free-text answer as a business fact.
+        """Save a free-text answer as a project and domain fact.
 
-        Anything the user types in their own words is a statement about how
-        their business works, so it goes into the shared memory where every
-        later agent can see it - not just the one that asked.
+        Anything the user types in their own words is context about the dataset
+        or its domain, so it goes into shared memory where every later agent can
+        see it - not just the one that asked.
         """
         if answer.is_custom and answer.text:
             state.remember(

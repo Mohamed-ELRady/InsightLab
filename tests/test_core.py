@@ -165,6 +165,20 @@ class TestPipelineState:
         assert change.details["rows_before"] == len(sample_frame)
         assert change.details["rows_after"] == 10
 
+    def test_a_profile_is_reused_until_the_frame_changes(self, sample_frame):
+        from insightlab.analysis.profiling import ensure_profile
+
+        state = PipelineState()
+        state.set_frame(sample_frame, "load", "Loaded")
+        first = ensure_profile(state)
+
+        assert ensure_profile(state) is first
+
+        state.set_frame(sample_frame.head(10), "clean", "Removed rows")
+        second = ensure_profile(state)
+        assert second is not first
+        assert second.row_count == 10
+
     def test_the_summary_is_json_safe(self, sample_frame):
         import json
 

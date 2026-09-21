@@ -65,6 +65,28 @@ class TestLanding:
         assert "Cerebras" in labels
         assert "xAI" in labels
 
+    def test_every_run_has_an_explicit_memory_project(self, app):
+        picker = app.selectbox(key="memory_project_choice")
+        assert picker.label == "Memory project"
+        assert "＋ New project" in picker.options
+        assert app.text_input(key="new_memory_project_name").value == "My project"
+
+    def test_an_existing_projects_memory_loads_automatically(self, app):
+        from insightlab.core.project_memory import ProjectMemoryStore
+
+        store = ProjectMemoryStore()
+        project = store.ensure_project("Client Alpha")
+        store.add_memory(project.id, "Exclude internal test orders", category="exclusion")
+        app.run()
+        app.selectbox(key="memory_project_choice").set_value("Client Alpha").run()
+        start_sample_run(app)
+
+        state = app.session_state["state"]
+        assert state.project_id == project.id
+        assert state.project_name == "Client Alpha"
+        assert "Exclude internal test orders" in [fact.statement for fact in state.memory]
+        assert not [box for box in app.checkbox if box.label == "Use what an earlier analysis learned"]
+
     def test_a_gui_key_is_passed_to_the_run_without_touching_the_environment(
         self, app, monkeypatch
     ):
@@ -75,6 +97,123 @@ class TestLanding:
         settings = app.session_state["supervisor"].reasoning.settings
         assert settings.llm_provider == "groq"
         assert settings.api_key == "session-only-key"
+
+    def test_multiple_keys_and_fallback_providers_reach_the_run(self, app, monkeypatch):
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        app.number_input(key="llm_api_key_count_groq").set_value(2).run()
+        app.text_input(key="llm_api_key_groq").set_value("groq-one").run()
+        app.text_input(key="llm_api_key_groq_2").set_value("groq-two").run()
+        app.multiselect(key="llm_fallback_providers").set_value(["google"]).run()
+        app.text_input(key="llm_api_key_google").set_value("google-one").run()
+        start_sample_run(app)
+
+        settings = app.session_state["supervisor"].reasoning.settings
+        assert settings.api_keys == ("groq-one", "groq-two")
+        assert [(route.provider, route.api_keys) for route in settings.fallback_routes] == [
+            ("google", ("google-one",))
+        ]
+
+    def test_ai_status_and_connection_editor_remain_available_during_a_run(self, app):
+        assert any("AI off" in expander.label for expander in app.expander)
+        start_sample_run(app)
+
+        assert any("AI off" in expander.label for expander in app.expander)
+        assert app.selectbox(key="llm_provider")
+        assert app.text_input(key="llm_api_key_groq")
+
+        app.text_input(key="llm_api_key_groq").set_value("added-during-analysis").run()
+
+        reasoning = app.session_state["supervisor"].reasoning
+        assert reasoning.settings.api_key == "added-during-analysis"
+        assert pending(app) is not None, "editing the connection must not restart the workflow"
+
+
+class TestArabicInterface:
+    def arabic(self, app: AppTest) -> AppTest:
+        app.button_group[0].set_value("ar").run()
+        assert not app.exception
+        return app
+
+    def test_language_switch_translates_the_complete_landing_shell(self, app):
+        self.arabic(app)
+
+        assert app.title[0].value == "افهم بياناتك بنفسك"
+        assert app.file_uploader[0].label == "ملفات بياناتك"
+        assert app.radio[0].label == "تحب نشتغل إزاي؟"
+        assert app.radio[0].options == [
+            "اسألني عند كل قرار",
+            "شغّل كل حاجة أوتوماتيك",
+        ]
+        assert [button.label for button in app.button] == [
+            "ابدأ التحليل",
+            "جرّب ببيانات تجريبية",
+        ]
+        rendered = " ".join(element.value for element in app.markdown)
+        captions = " ".join(element.value for element in app.caption)
+        assert "نسخة منظّفة من بياناتك" in rendered
+        assert "التغيّر بمرور الوقت" in captions
+        assert "العلاقات بين القياسات" in captions
+        assert "وضع دون اتصال" in captions
+        assert "Without credentials" not in captions
+
+    def test_arabic_mode_injects_rtl_rules_for_all_interactive_surfaces(self, app):
+        self.arabic(app)
+
+        styles = "\n".join(
+            element.value
+            for element in app.markdown
+            if "<style>" in element.value
+        )
+        for selector in (
+            'direction: rtl',
+            '[data-testid="stTabs"]',
+            '[role="listbox"]',
+            '[data-testid="stChatInput"]',
+        ):
+            assert selector in styles
+
+    def test_arabic_choice_reaches_the_run_and_first_decision(self, app):
+        self.arabic(app)
+        [button for button in app.button if button.label == "جرّب ببيانات تجريبية"][0].click().run()
+
+        state = app.session_state["state"]
+        decision = pending(app)
+        assert state.language.code == "ar"
+        assert decision is not None
+        from insightlab.reports.arabic import contains_arabic
+
+        assert contains_arabic(decision.topic)
+        assert contains_arabic(decision.question)
+        assert contains_arabic(decision.suggestion.label)
+        assert [button for button in app.button if button.label == "كمّل"]
+        assert any(expander.label == "اعرض الأرقام اللي وراها" for expander in app.expander)
+
+    def test_complete_arabic_workflow_keeps_every_decision_and_result_localised(self, app):
+        from insightlab.reports.arabic import contains_arabic
+
+        self.arabic(app)
+        [button for button in app.button if button.label == "جرّب ببيانات تجريبية"][0].click().run()
+
+        decisions = 0
+        for _ in range(40):
+            decision = pending(app)
+            if decision is None:
+                break
+            assert contains_arabic(decision.topic)
+            assert contains_arabic(decision.question)
+            assert contains_arabic(decision.suggestion.label)
+            [button for button in app.button if button.label == "كمّل"][0].click().run()
+            assert not app.exception, app.exception
+            decisions += 1
+
+        state = app.session_state["state"]
+        assert decisions >= 10, "the test must traverse the multi-stage workflow"
+        assert pending(app) is None
+        assert not state.errors
+        assert all(contains_arabic(chart.title) for chart in state.charts)
+        assert all(contains_arabic(insight.interpretation) for insight in state.insights)
+        assert "لوحات المتابعة" in [tab.label for tab in app.tabs]
+        assert "التحميلات" in [tab.label for tab in app.tabs]
 
 
 class TestDecisionPanel:
@@ -213,6 +352,27 @@ class TestCompletedRun:
         labels = [element.label for element in finished.get("download_button")]
         assert labels
         assert any("cleaned data" in label for label in labels)
+
+    def test_a_user_can_add_and_persist_a_chart_from_selected_columns(self, finished):
+        from insightlab.core.storage import RunWorkspace
+
+        state = finished.session_state["state"]
+        previous_count = len(state.charts)
+
+        finished.selectbox(key="custom_chart_kind").set_value("scatter").run()
+        x_picker = finished.selectbox(key="custom_chart_x")
+        y_picker = finished.selectbox(key="custom_chart_y_required")
+        x_picker.set_value("revenue").run()
+        y_picker = finished.selectbox(key="custom_chart_y_required")
+        y_picker.set_value("cost").run()
+        finished.button(key="add_custom_chart").click().run()
+
+        assert not finished.exception
+        custom = state.charts[-1]
+        assert len(state.charts) == previous_count + 1
+        assert custom.axis == "custom"
+        assert custom.kind == "scatter"
+        assert RunWorkspace(state.run_id, state.workspace).chart_path(custom.id).exists()
 
 
 class TestAutonomousMode:

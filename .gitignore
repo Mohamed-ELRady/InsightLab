@@ -49,3 +49,9 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Local agent links and development captures
+/.agents/
+/.claude/
+/fig*.png
+/runing.txt

@@ -12,7 +12,7 @@ resumed later without any agent needing to know that happened.
 
 from __future__ import annotations
 
-from typing import Iterator
+from typing import Callable, Iterator
 
 from ..core.activity_log import EventKind
 from ..core.decision import Answer, Decision
@@ -45,6 +45,8 @@ class Supervisor:
         self._pending: Decision | None = None
         self._finished = False
         self.current_agent: Agent | None = None
+        self._progress_callback: Callable[[float, str, str], None] | None = None
+        self.state._progress_reporter = self._receive_stage_progress
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -69,16 +71,30 @@ class Supervisor:
         return STAGE_TITLES.get(stage, "")
 
     def progress(self) -> float:
-        """Share of stages that have been dealt with, for a progress bar."""
-        statuses = list(self.state.stage_status.values())
-        if not statuses:
+        """Share of the complete run, including work inside the active stage."""
+        if self._finished:
+            return 1.0
+        stage_keys = [key for key, _ in self.state.stage_status.items()]
+        if not stage_keys:
             return 0.0
-        settled = sum(
-            1
-            for status in statuses
-            if status in (StageStatus.DONE, StageStatus.SKIPPED, StageStatus.FAILED)
-        )
-        return settled / len(statuses)
+        completed = 0.0
+        for stage in stage_keys:
+            status = self.state.stage_status[stage]
+            if status in (StageStatus.DONE, StageStatus.SKIPPED, StageStatus.FAILED):
+                completed += 1.0
+            elif status is StageStatus.RUNNING:
+                completed += self.state.stage_progress.get(stage, 0.0)
+        return min(1.0, completed / len(stage_keys))
+
+    def set_progress_callback(
+        self, callback: Callable[[float, str, str], None] | None
+    ) -> None:
+        """Attach the progress control created for the current Streamlit run."""
+        self._progress_callback = callback
+
+    def _receive_stage_progress(self, stage: str, fraction: float, detail: str) -> None:
+        if self._progress_callback is not None:
+            self._progress_callback(self.progress(), stage, detail)
 
     # -- driving -----------------------------------------------------------
 
@@ -125,6 +141,8 @@ class Supervisor:
 
     def explain_change(self, **kwargs):
         """Break a movement down across every dimension. See ``attribution``."""
+        if not self.state.understanding.is_business:
+            return None
         from ..analysis import attribution
 
         return attribution.explain(self.state, **kwargs)
@@ -165,6 +183,8 @@ class Supervisor:
                 self._pending = None
                 self._finished = True
                 self.current_agent = None
+                if self._progress_callback is not None:
+                    self._progress_callback(1.0, "", "complete")
                 return None
 
             self._pending = decision
@@ -220,10 +240,27 @@ def build_default_agents(reasoning: ReasoningEngine) -> list[Agent]:
 
     return [
         DataLoaderAgent(reasoning),
-        MemoryAgent(reasoning),
         DataUnderstandingAgent(reasoning),
+        MemoryAgent(reasoning),
         DataCleaningAgent(reasoning),
         FeatureEngineeringAgent(reasoning),
+        ExploratoryAnalysisAgent(reasoning),
+        KpiAgent(reasoning),
+        InsightAgent(reasoning),
+        DashboardAgent(reasoning),
+        ReportAgent(reasoning),
+    ]
+
+
+def build_revision_agents(reasoning: ReasoningEngine) -> list[Agent]:
+    """Regenerate outputs while preserving understood, cleaned, prepared data."""
+    from .dashboard import DashboardAgent
+    from .eda import ExploratoryAnalysisAgent
+    from .insight import InsightAgent
+    from .kpi import KpiAgent
+    from .report import ReportAgent
+
+    return [
         ExploratoryAnalysisAgent(reasoning),
         KpiAgent(reasoning),
         InsightAgent(reasoning),

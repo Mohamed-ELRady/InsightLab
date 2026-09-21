@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -39,7 +39,7 @@ class StageStatus(str, Enum):
 
 
 class Role(str, Enum):
-    """What a column means in business terms, not what dtype pandas gave it."""
+    """What a column means analytically, not what dtype pandas gave it."""
 
     IDENTIFIER = "identifier"
     DATETIME = "datetime"
@@ -54,8 +54,8 @@ class Role(str, Enum):
 #: Pipeline order. The supervisor walks these in sequence.
 STAGES: tuple[tuple[str, str], ...] = (
     ("load", "Loading your data"),
-    ("recall", "Checking what we already know"),
     ("understand", "Understanding the data"),
+    ("recall", "Checking what we already know"),
     ("clean", "Cleaning the data"),
     ("features", "Building new measures"),
     ("explore", "Exploring the data"),
@@ -129,8 +129,98 @@ class DatasetProfile:
 
 
 @dataclass
+class Clarification:
+    """One domain question the file cannot answer on its own."""
+
+    kind: str
+    question: str
+    reason: str
+    column: str = ""
+    suggested_answer: str = ""
+    answer: str = ""
+
+    @property
+    def answered(self) -> bool:
+        return bool(self.answer.strip())
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "question": self.question,
+            "reason": self.reason,
+            "column": self.column,
+            "suggested_answer": self.suggested_answer,
+            "answer": self.answer,
+        }
+
+
+@dataclass
+class DatasetUnderstanding:
+    """The plain-language reading established before analysis begins.
+
+    This is deliberately separate from :class:`DatasetProfile`. The profile
+    says what pandas can measure; this value says what those columns appear to
+    mean in their real-world domain and records anything only the user could
+    clarify.
+    """
+
+    # ``business_domain`` is kept for backwards-compatible saved runs.  It now
+    # means the dataset's real-world domain and is never assumed to be business.
+    business_domain: str = ""
+    domain_family: str = "general"
+    dataset_title: str = ""
+    subject: str = ""
+    row_represents: str = ""
+    analysis_goal: str = ""
+    hook: str = ""
+    confidence: str = "low"
+    summary: str = ""
+    important_columns: list[str] = field(default_factory=list)
+    primary_measure: str = ""
+    primary_date: str = ""
+    primary_category: str = ""
+    measure_aggregations: dict[str, str] = field(default_factory=dict)
+    suggested_questions: list[str] = field(default_factory=list)
+    questions: list[Clarification] = field(default_factory=list)
+    source: str = "rules"
+
+    @property
+    def unanswered(self) -> list[Clarification]:
+        return [question for question in self.questions if not question.answered]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "business_domain": self.business_domain,
+            "domain_family": self.domain_family,
+            "dataset_title": self.dataset_title,
+            "subject": self.subject,
+            "row_represents": self.row_represents,
+            "analysis_goal": self.analysis_goal,
+            "hook": self.hook,
+            "confidence": self.confidence,
+            "summary": self.summary,
+            "important_columns": self.important_columns,
+            "primary_measure": self.primary_measure,
+            "primary_date": self.primary_date,
+            "primary_category": self.primary_category,
+            "measure_aggregations": self.measure_aggregations,
+            "suggested_questions": self.suggested_questions,
+            "questions": [question.to_dict() for question in self.questions],
+            "source": self.source,
+        }
+
+    @property
+    def is_business(self) -> bool:
+        return self.domain_family in {"business", "commerce", "finance"}
+
+    def aggregation_for(self, column: str, default: str = "mean") -> str:
+        value = self.measure_aggregations.get(column, default)
+        return value if value in {"sum", "mean", "median", "count"} else default
+
+
+@dataclass
 class Insight:
-    """A business conclusion with the evidence that supports it.
+    """A domain-aware conclusion with the evidence that supports it.
 
     ``caveat`` carries a confounding variable that changes how the finding
     should be read; ``objection`` carries what an adversarial review of it
@@ -276,6 +366,19 @@ class PipelineState:
         self.language = language or DEFAULT_LANGUAGE
         self.started_at = datetime.now(timezone.utc)
         self.workspace = workspace
+        self.project_id: str = ""
+        self.project_name: str = ""
+        self.project_preferences: dict[str, str] = {}
+        # Explicit feedback may reorder presentation, never calculations.
+        self.learning_profile: dict[str, Any] = {}
+        self.improvement_policy: dict[str, float] = {}
+        self.improvement_policy_version: int = 0
+        # A user's explicit request for this run/rebuild. It steers agents now
+        # but is not promoted into long-term memory until the user approves the
+        # learning candidate created from their feedback.
+        self.analysis_directive: str = ""
+        self.parent_run_id: str = ""
+        self.revision_kind: str = ""
 
         # Source
         self.source_path: Path | None = None
@@ -289,6 +392,13 @@ class PipelineState:
         self.raw_frame: pd.DataFrame | None = None
         self.frame: pd.DataFrame | None = None
         self.profile = DatasetProfile()
+        # Profiling a large frame is intentionally thorough and therefore not
+        # free.  Agents used to rebuild the same profile at every boundary even
+        # when no row or column had changed.  The two revisions let them reuse
+        # an exact snapshot and invalidate it only through ``set_frame``.
+        self._frame_revision = 0
+        self._profile_revision = -1
+        self.understanding = DatasetUnderstanding()
         self.engineered_columns: list[str] = []
 
         # Comparison with earlier runs
@@ -313,17 +423,36 @@ class PipelineState:
         self.answers: list[tuple[Decision, Answer]] = []
         self.artefacts: dict[str, Path] = {}
         self.errors: list[str] = []
+        # UI-only hook. It is deliberately excluded from ``summary_dict`` so a
+        # live Streamlit object can never leak into the saved run. Agents use
+        # it to report real sub-stage progress during long synchronous work.
+        self._progress_reporter: Callable[[str, float, str], None] | None = None
+        self.stage_progress: dict[str, float] = {}
 
     # -- stages ------------------------------------------------------------
 
+    def report_progress(self, stage: str, fraction: float, detail: str = "") -> None:
+        """Report monotonic progress inside one pipeline stage.
+
+        ``fraction`` is local to the stage. The supervisor maps it onto the
+        complete 0–100% run before the application renders it.
+        """
+        value = max(0.0, min(1.0, float(fraction)))
+        value = max(value, self.stage_progress.get(stage, 0.0))
+        self.stage_progress[stage] = value
+        if self._progress_reporter is not None:
+            self._progress_reporter(stage, value, detail)
+
     def begin_stage(self, stage: str) -> None:
         self.stage_status[stage] = StageStatus.RUNNING
+        self.report_progress(stage, 0.0, "progress.stage.start")
         self.log.record(
             EventKind.STAGE_STARTED, stage, f"Started: {STAGE_TITLES.get(stage, stage)}"
         )
 
     def finish_stage(self, stage: str, summary: str = "") -> None:
         self.stage_status[stage] = StageStatus.DONE
+        self.report_progress(stage, 1.0, "progress.stage.done")
         self.log.record(
             EventKind.STAGE_FINISHED,
             stage,
@@ -332,6 +461,7 @@ class PipelineState:
 
     def skip_stage(self, stage: str, reason: str = "") -> None:
         self.stage_status[stage] = StageStatus.SKIPPED
+        self.report_progress(stage, 1.0, "progress.stage.done")
         self.log.record(
             EventKind.STAGE_SKIPPED,
             stage,
@@ -340,6 +470,7 @@ class PipelineState:
 
     def fail_stage(self, stage: str, reason: str) -> None:
         self.stage_status[stage] = StageStatus.FAILED
+        self.report_progress(stage, 1.0, "progress.stage.failed")
         self.errors.append(f"{stage}: {reason}")
         self.log.record(EventKind.ERROR, stage, reason)
 
@@ -356,6 +487,8 @@ class PipelineState:
         """Replace the working frame and log what changed."""
         before = (0, 0) if self.frame is None else self.frame.shape
         self.frame = frame
+        self._frame_revision += 1
+        self._profile_revision = -1
         after = frame.shape
         self.log.record(
             EventKind.DATA_CHANGED,
@@ -367,9 +500,23 @@ class PipelineState:
             columns_after=after[1],
         )
 
+    @property
+    def profile_is_current(self) -> bool:
+        """Whether ``profile`` describes the current working dataframe."""
+        return self.frame is not None and self._profile_revision == self._frame_revision
+
+    def set_profile(self, profile: DatasetProfile) -> DatasetProfile:
+        """Store a profile and mark it as the snapshot of the current frame."""
+        self.profile = profile
+        self._profile_revision = self._frame_revision
+        return profile
+
     def remember(
         self, statement: str, *, category: str = "context", stage: str = "", topic: str = ""
     ) -> None:
+        domain = self.understanding.domain_family
+        if domain and domain != "general" and not topic.startswith("domain:"):
+            topic = f"domain:{domain}|{topic}"
         fact = self.memory.remember(
             statement, category=category, stage=stage, topic=topic
         )
@@ -425,6 +572,14 @@ class PipelineState:
             "mode": self.mode.value,
             "language": self.language.code,
             "started_at": self.started_at.isoformat(),
+            "project": {"id": self.project_id, "name": self.project_name},
+            "project_preferences": self.project_preferences,
+            "improvement_policy_version": self.improvement_policy_version,
+            "revision": {
+                "parent_run_id": self.parent_run_id,
+                "kind": self.revision_kind,
+                "directive": self.analysis_directive,
+            },
             "fingerprint": self.fingerprint or fingerprint(self.raw_frame),
             "period": period,
             "source": {
@@ -433,6 +588,7 @@ class PipelineState:
                 "notes": self.load_notes,
             },
             "profile": self.profile.to_dict(),
+            "understanding": self.understanding.to_dict(),
             "engineered_columns": self.engineered_columns,
             "focus_axes": self.focus_axes,
             "charts": [chart.to_dict() for chart in self.charts],

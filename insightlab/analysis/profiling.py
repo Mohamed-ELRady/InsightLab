@@ -274,7 +274,15 @@ def _column_note(profile: ColumnProfile) -> str:
         notes.append("every row holds the same value, so it cannot explain anything")
 
     if profile.role is Role.MEASURE:
-        if profile.stats.get("negatives", 0):
+        signed_measure = any(
+            token in profile.name.casefold()
+            for token in (
+                "latitude", "longitude", "temperature", "temp", "change",
+                "delta", "difference", "deviation", "balance", "profit",
+                "loss", "elevation", "altitude", "coordinate",
+            )
+        )
+        if profile.stats.get("negatives", 0) and not signed_measure:
             notes.append(f"{profile.stats['negatives']} rows hold a negative number")
         if abs(profile.stats.get("skew", 0.0)) > 2:
             notes.append("a few very large values pull the average up")
@@ -296,6 +304,18 @@ def profile_dataset(frame: pd.DataFrame) -> DatasetProfile:
     )
     profile.summary = describe_shape(profile)
     return profile
+
+
+def ensure_profile(state) -> DatasetProfile:
+    """Return the current state's profile, rebuilding only after data changed.
+
+    Keeping this helper here avoids making :mod:`core.state` depend on the
+    analysis package.  ``set_frame`` is the single invalidation point, so reuse
+    never serves statistics from an older dataframe.
+    """
+    if state.profile_is_current:
+        return state.profile
+    return state.set_profile(profile_dataset(state.frame))
 
 
 def describe_shape(profile: DatasetProfile) -> str:
